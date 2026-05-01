@@ -11,58 +11,69 @@
 // new/delete を ExAllocatePoolWithTag/ExFreePool に結び付けています。
 // CDebugCallInOut とスピンロックラッパは、例外を使わないカーネルコードでも
 // スコープ終了時に後始末できるようにするための RAII 補助です。
+// 概要: カーネルプールからメモリを確保します。
 void* __cdecl operator new(size_t size)
 {
     return ExAllocatePoolWithTag(PagedPool, size, CPP_TAG);
 }
 
+// 概要: カーネルプールからメモリを確保します。
 void* operator new(size_t size, POOL_TYPE type, ULONG tag)
 {
     return ExAllocatePoolWithTag(type, size, tag);
 }
 
+// 概要: カーネルプールからメモリを確保します。
 void* __cdecl operator new[](size_t size)
 {
     return ExAllocatePoolWithTag(PagedPool, size, CPP_TAG);
 }
 
+// 概要: カーネルプールからメモリを確保します。
 void* operator new[](size_t size, POOL_TYPE type, ULONG tag)
 {
     return ExAllocatePoolWithTag(type, size, tag);
 }
 
+// 概要: カーネルプールへメモリを解放します。
 void __cdecl operator delete(void* ptr, size_t size)
 {
     UNREFERENCED_PARAMETER(size);
     ExFreePool(ptr);
 }
 
+// 概要: カーネルプールへメモリを解放します。
 void __cdecl operator delete[](void* ptr)
 {
     ExFreePool(ptr);
 }
 
+// 概要: カーネルプールへメモリを解放します。
 void __cdecl operator delete[](void* ptr, size_t size)
 {
     UNREFERENCED_PARAMETER(size);
     ExFreePool(ptr);
 }
 
+// 概要: デバッグログへ状態やコマンド情報を出力します。
 static __inline void DebugCallIn(const char* func_name, const char* prefix)
 {
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DBG_FILTER, "%s [%s] IN =>\n", prefix, func_name);
 }
 
+// 概要: デバッグログへ状態やコマンド情報を出力します。
 static __inline void DebugCallOut(const char* func_name, const char* prefix)
 {
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DBG_FILTER, "%s [%s] OUT <=\n", prefix, func_name);
 }
 
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CDebugCallInOut::CDebugCallInOut(const char* name)
     : CDebugCallInOut((char*)name)
 {
 }
 
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CDebugCallInOut::CDebugCallInOut(char* name)
 {
     this->Name = (char*)new(NonPagedPoolNx, CALLINOUT_TAG) char[this->BufSize];
@@ -73,6 +84,7 @@ CDebugCallInOut::CDebugCallInOut(char* name)
     }
 }
 
+// 概要: オブジェクトの終了処理と保持リソースの解放を行います。
 CDebugCallInOut::~CDebugCallInOut()
 {
     if (NULL != this->Name)
@@ -82,6 +94,7 @@ CDebugCallInOut::~CDebugCallInOut()
     }
 }
 
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CSpinLock::CSpinLock(KSPIN_LOCK* lock, bool acquire)
 {
     this->Lock = lock;
@@ -90,6 +103,7 @@ CSpinLock::CSpinLock(KSPIN_LOCK* lock, bool acquire)
         DoAcquire();
 }
 
+// 概要: オブジェクトの終了処理と保持リソースの解放を行います。
 CSpinLock::~CSpinLock()
 {
     DoRelease();
@@ -97,6 +111,7 @@ CSpinLock::~CSpinLock()
     this->IsAcquired = false;
 }
 
+// 概要: スピンロックを取得して IRQL を保存します。
 void CSpinLock::DoAcquire()
 {
     if (!IsAcquired)
@@ -106,6 +121,7 @@ void CSpinLock::DoAcquire()
     }
 }
 
+// 概要: スピンロックを解放して IRQL を復元します。
 void CSpinLock::DoRelease()
 {
     if (IsAcquired)
@@ -115,17 +131,20 @@ void CSpinLock::DoRelease()
     }
 }
 
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CStorSpinLock::CStorSpinLock(PVOID devext, STOR_SPINLOCK reason, PVOID ctx)
 {
     this->DevExt = devext;
     Acquire(reason, ctx);
 }
 
+// 概要: オブジェクトの終了処理と保持リソースの解放を行います。
 CStorSpinLock::~CStorSpinLock()
 {
     Release();
 }
 
+// 概要: 指定条件を満たすかどうかを判定します。
 bool IsSupportedOS(ULONG major, ULONG minor)
 {
     OSVERSIONINFOW info = { 0 };
@@ -141,11 +160,13 @@ bool IsSupportedOS(ULONG major, ULONG minor)
     return false;
 }
 
+// 概要: デバッグログへ状態やコマンド情報を出力します。
 void DebugSrbFunctionCode(ULONG code)
 {
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DBG_FILTER, "%s Got SRB cmd, code (0x%08X)\n", DEBUG_PREFIX, code);
 }
 
+// 概要: デバッグログへ状態やコマンド情報を出力します。
 void DebugScsiOpCode(UCHAR opcode)
 {
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DBG_FILTER, "%s Got SCSI Cmd(0x%02X)\n", DEBUG_PREFIX, opcode);
@@ -155,6 +176,7 @@ void DebugScsiOpCode(UCHAR opcode)
 // SRB_FUNCTION_IO_CONTROL のうち IOCTL_SCSI_MINIPORT_* 系を処理します。
 // Windows のストレージスタックは SRB_IO_CONTROL を先頭にしたバッファを渡すため、
 // Signature と ControlCode/Function を確認して、対応する処理へ振り分けます。
+// 概要: IOCTL 要求を解釈して処理へ振り分けます。
 UCHAR IoctlScsiMiniport_Firmware(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl)
 {
     ULONG data_len = srbext->DataBufLen();
@@ -185,6 +207,7 @@ UCHAR IoctlScsiMiniport_Firmware(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl)
 // Storport から通知されるアダプタ制御イベントの補助処理です。
 // サポートする制御種別の申告、再起動、サプライズリムーブ、電源遷移などは
 // HwAdapterControl からここへ分岐します。
+// 概要: Storport または SCSI のイベントを処理します。
 SCSI_ADAPTER_CONTROL_STATUS Handle_QuerySupportedControlTypes(
     PSCSI_SUPPORTED_CONTROL_TYPE_LIST list)
 {
@@ -203,6 +226,7 @@ SCSI_ADAPTER_CONTROL_STATUS Handle_QuerySupportedControlTypes(
     return ScsiAdapterControlSuccess;
 }
 
+// 概要: Storport または SCSI のイベントを処理します。
 SCSI_ADAPTER_CONTROL_STATUS Handle_RestartAdapter(CNvmeDevice* devext)
 {
     devext->RestartController();
@@ -212,6 +236,7 @@ SCSI_ADAPTER_CONTROL_STATUS Handle_RestartAdapter(CNvmeDevice* devext)
 // Windows 標準のファームウェア情報取得要求を NVMe Admin Command へ変換します。
 // 現状は GET_INFO を中心に実装しており、DOWNLOAD/ACTIVATE は安全側で無効化されています。
 
+// 概要: NVMe の状態や完了コードを変換します。
 static ULONG NvmeStatus2FirmwareStatus(NVME_COMMAND_STATUS *status)
 {
     if(NVME_STATUS_TYPE_GENERIC_COMMAND == status->SCT &&
@@ -232,6 +257,7 @@ static ULONG NvmeStatus2FirmwareStatus(NVME_COMMAND_STATUS *status)
     return FIRMWARE_STATUS_CONTROLLER_ERROR;        
 }
 
+// 概要: 応答用構造体へ必要な情報を設定します。
 static void FillFirmwareInfoV2(
     CNvmeDevice* nvme,
     PNVME_FIRMWARE_SLOT_INFO_LOG logpage,
@@ -266,6 +292,7 @@ static void FillFirmwareInfoV2(
         ret_info->Slot[0].ReadOnly = TRUE;
 }
 
+// 概要: 応答用構造体へ必要な情報を設定します。
 static void FillFirmwareInfoV1(
     CNvmeDevice* nvme,
     PNVME_FIRMWARE_SLOT_INFO_LOG logpage,
@@ -291,6 +318,7 @@ static void FillFirmwareInfoV1(
         ret_info->Slot[0].ReadOnly = TRUE;
 }
 
+// 概要: コマンド完了後の後処理と SRB 完了通知を行います。
 VOID Complete_FirmwareInfo(SPCNVME_SRBEXT *srbext)
 {
     CNvmeDevice* nvme = srbext->DevExt;
@@ -339,6 +367,7 @@ END:
     srbext->CompleteSrb(srb_status);
 }
 
+// 概要: ファームウェア関連要求を処理します。
 UCHAR Firmware_GetInfo(PSPCNVME_SRBEXT srbext)
 {
     PNVME_FIRMWARE_SLOT_INFO_LOG logpage = NULL;
@@ -362,6 +391,7 @@ UCHAR Firmware_GetInfo(PSPCNVME_SRBEXT srbext)
     
     return SRB_STATUS_PENDING;
 }
+// 概要: ファームウェア関連要求を処理します。
 UCHAR Firmware_DownloadToAdapter(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, PFIRMWARE_REQUEST_BLOCK request)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -369,6 +399,7 @@ UCHAR Firmware_DownloadToAdapter(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, 
     UNREFERENCED_PARAMETER(request);
     return SRB_STATUS_INVALID_REQUEST;
 }
+// 概要: ファームウェア関連要求を処理します。
 UCHAR Firmware_ActivateSlot(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, PFIRMWARE_REQUEST_BLOCK request)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -380,22 +411,26 @@ UCHAR Firmware_ActivateSlot(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, PFIRM
 // NVMe の PRP(Physical Region Page) を組み立てる処理です。
 // データバッファの物理ページを PRP1/PRP2 または PRP list に変換し、
 // コントローラが DMA で参照できる形にします。
+// 概要: 内部状態やデバイス情報を取得します。
 static inline size_t GetDistanceToNextPage(PUCHAR ptr)
 {
     return (((PUCHAR)PAGE_ALIGN(ptr) + PAGE_SIZE) - ptr);
 }
 
+// 概要: データ転送用の PRP 情報を構築します。
 static inline void BuildPrp1(ULONG64 &prp1, PVOID ptr)
 {
     PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(ptr);
     prp1 = pa.QuadPart;
 }
+// 概要: データ転送用の PRP 情報を構築します。
 static inline void BuildPrp2(ULONG64& prp2, PVOID ptr)
 {
     PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(ptr);
     prp2 = pa.QuadPart;
 }
 
+// 概要: データ転送用の PRP 情報を構築します。
 static void BuildPrp2List(PVOID prp2, PVOID ptr, size_t size)
 {
     PHYSICAL_ADDRESS pa = {0};
@@ -421,6 +456,7 @@ static void BuildPrp2List(PVOID prp2, PVOID ptr, size_t size)
     }
 }
 
+// 概要: データ転送用の PRP 情報を構築します。
 bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t buf_size)
 {
     PUCHAR cursor = (PUCHAR) buffer;
@@ -459,11 +495,13 @@ bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t bu
 // SCSI の転送長とオフセットはブロック単位なので、Namespace ID と範囲を確認してから
 // I/O Queue へ投入します。
 
+// 概要: コマンド完了後の後処理と SRB 完了通知を行います。
 void Complete_ScsiReadWrite(SPCNVME_SRBEXT *srbext)
 {
     srbext->CleanUp();
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG len, bool is_write)
 {
     UCHAR srb_status = SRB_STATUS_PENDING;
@@ -492,12 +530,14 @@ UCHAR Scsi_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG len, bool is_
 // STORAGE_REQUEST_BLOCK(SRB) に紐付くドライバ専用拡張領域です。
 // 元 SRB、NVMe コマンド、一時バッファ、PRP list、完了コールバックをまとめて保持し、
 // BuildIo から Queue 完了まで同じ文脈を受け渡します。
+// 概要: 内部変数やデバイス状態を初期化します。
 _SPCNVME_SRBEXT* _SPCNVME_SRBEXT::InitSrbExt(PVOID devext, PSTORAGE_REQUEST_BLOCK srb)
 {
 	PSPCNVME_SRBEXT srbext = (PSPCNVME_SRBEXT)SrbGetMiniportContext(srb);
 	srbext->Init(devext, srb);
 	return srbext;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 _SPCNVME_SRBEXT* _SPCNVME_SRBEXT::GetSrbExt(PSTORAGE_REQUEST_BLOCK srb)
 {
     PSPCNVME_SRBEXT ret = (PSPCNVME_SRBEXT)SrbGetMiniportContext(srb);
@@ -505,6 +545,7 @@ _SPCNVME_SRBEXT* _SPCNVME_SRBEXT::GetSrbExt(PSTORAGE_REQUEST_BLOCK srb)
     return ret;
 }
 
+// 概要: 内部変数やデバイス状態を初期化します。
 void _SPCNVME_SRBEXT::Init(PVOID devext, STORAGE_REQUEST_BLOCK* srb)
 {
     RtlZeroMemory(this, sizeof(_SPCNVME_SRBEXT));
@@ -516,6 +557,7 @@ void _SPCNVME_SRBEXT::Init(PVOID devext, STORAGE_REQUEST_BLOCK* srb)
     Tag = ScsiQTag();
 }
 
+// 概要: 要求で使用した一時リソースを解放します。
 void _SPCNVME_SRBEXT::CleanUp()
 {
     ResetExtBuf(NULL);
@@ -525,11 +567,13 @@ void _SPCNVME_SRBEXT::CleanUp()
         Prp2VA = NULL;
     }
 }
+// 概要: コマンド完了後の後処理と SRB 完了通知を行います。
 void _SPCNVME_SRBEXT::CompleteSrb(NVME_COMMAND_STATUS &nvme_status)
 {
     UCHAR status = NvmeToSrbStatus(nvme_status);
     CompleteSrb(status);
 }
+// 概要: コマンド完了後の後処理と SRB 完了通知を行います。
 void _SPCNVME_SRBEXT::CompleteSrb(UCHAR status)
 {
     if (NULL != Srb)
@@ -539,61 +583,72 @@ void _SPCNVME_SRBEXT::CompleteSrb(UCHAR status)
         StorPortNotification(RequestComplete, DevExt, Srb);
     }
 }
+// 概要: FuncCode の処理を行います。
 ULONG _SPCNVME_SRBEXT::FuncCode()
 {
     if(NULL == Srb)
         return SRB_FUNCTION_SPC_INTERNAL;
     return SrbGetSrbFunction(Srb);
 }
+// 概要: ScsiQTag の処理を行います。
 ULONG _SPCNVME_SRBEXT::ScsiQTag()
 {
     if (NULL == Srb)
         return 0;
     return SrbGetQueueTag(Srb);
 }
+// 概要: Cdb の処理を行います。
 PCDB _SPCNVME_SRBEXT::Cdb()
 {
     if (NULL == Srb)
         return NULL;
     return SrbGetCdb(Srb);
 }
+// 概要: CdbLen の処理を行います。
 UCHAR _SPCNVME_SRBEXT::CdbLen() {
     if (NULL == Srb)
         return 0;
     return SrbGetCdbLength(Srb);
 }
+// 概要: PathID の処理を行います。
 UCHAR _SPCNVME_SRBEXT::PathID() {
     if (NULL == Srb)
         return INVALID_PATH_ID;
     return SrbGetPathId(Srb);
 }
+// 概要: TargetID の処理を行います。
 UCHAR _SPCNVME_SRBEXT::TargetID() {
     if (NULL == Srb)
         return INVALID_TARGET_ID;
     return SrbGetTargetId(Srb);
 }
+// 概要: Lun の処理を行います。
 UCHAR _SPCNVME_SRBEXT::Lun() {
     if (NULL == Srb)
         return INVALID_LUN_ID;
     return SrbGetLun(Srb);
 }
+// 概要: DataBuf の処理を行います。
 PVOID _SPCNVME_SRBEXT::DataBuf() {
     if (NULL == Srb)
         return NULL;
     return SrbGetDataBuffer(Srb);
 }
+// 概要: DataBufLen の処理を行います。
 ULONG _SPCNVME_SRBEXT::DataBufLen() {
     if (NULL == Srb)
         return 0;
     return SrbGetDataTransferLength(Srb);
 }
 
+// 概要: デバイスまたは内部設定を更新します。
 void _SPCNVME_SRBEXT::SetTransferLength(ULONG length)
 {
     if(NULL != Srb)
         SrbSetDataTransferLength(Srb, length);
 }
 
+// 概要: 内部状態や未完了要求を初期状態へ戻します。
 void _SPCNVME_SRBEXT::ResetExtBuf(PVOID new_buffer)
 {
     if(NULL != ExtBuf)
@@ -610,6 +665,7 @@ PSRBEX_DATA_PNP _SPCNVME_SRBEXT::SrbDataPnp()
 
 // NVMe Admin/I/O コマンドの Command Dword を設定するビルダ群です。
 // SCSI ハンドラや初期化処理は、ここで作った NVME_COMMAND を Queue に投入します。
+// 概要: 対応する NVMe コマンドを構築します。
 void BuiildCmd_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG blocks, bool is_write)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -625,6 +681,7 @@ void BuiildCmd_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG blocks, b
     cmd->u.READWRITE.CDW12.NLB = blocks - 1;
 }
 
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_IdentCtrler(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA data)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -636,6 +693,7 @@ void BuildCmd_IdentCtrler(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA
     cmd->u.IDENTIFY.CDW10.CNTID = 0;
     BuildPrp(srbext, cmd, (PVOID) data, sizeof(NVME_IDENTIFY_CONTROLLER_DATA));
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_IdentActiveNsidList(PSPCNVME_SRBEXT srbext, PVOID nsid_list, size_t list_size)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -646,6 +704,7 @@ void BuildCmd_IdentActiveNsidList(PSPCNVME_SRBEXT srbext, PVOID nsid_list, size_
     cmd->u.IDENTIFY.CDW10.CNS = NVME_IDENTIFY_CNS_ACTIVE_NAMESPACES;
     BuildPrp(srbext, cmd, nsid_list, list_size);
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_IdentSpecifiedNS(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_NAMESPACE_DATA data, ULONG nsid)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -657,6 +716,7 @@ void BuildCmd_IdentSpecifiedNS(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_NAMESPACE_
 
     BuildPrp(srbext, cmd, (PVOID)data, sizeof(NVME_IDENTIFY_NAMESPACE_DATA));
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_IdentAllNSList(PSPCNVME_SRBEXT srbext, PVOID ns_buf, size_t buf_size)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -668,6 +728,7 @@ void BuildCmd_IdentAllNSList(PSPCNVME_SRBEXT srbext, PVOID ns_buf, size_t buf_si
 
     BuildPrp(srbext, cmd, (PVOID)ns_buf, buf_size);
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_SetIoQueueCount(PSPCNVME_SRBEXT srbext, USHORT count)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -679,6 +740,7 @@ void BuildCmd_SetIoQueueCount(PSPCNVME_SRBEXT srbext, USHORT count)
     cmd->u.SETFEATURES.CDW11.NumberOfQueues.NSQ =
         cmd->u.SETFEATURES.CDW11.NumberOfQueues.NCQ = count - 1;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_RegIoSubQ(PSPCNVME_SRBEXT srbext, CNvmeQueue *queue)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -696,6 +758,7 @@ void BuildCmd_RegIoSubQ(PSPCNVME_SRBEXT srbext, CNvmeQueue *queue)
     cmd->u.CREATEIOSQ.CDW11.PC = TRUE;
     cmd->u.CREATEIOSQ.CDW11.QPRIO = NVME_NVM_QUEUE_PRIORITY_HIGH;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_RegIoCplQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -713,6 +776,7 @@ void BuildCmd_RegIoCplQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
     cmd->u.CREATEIOCQ.CDW11.IV = (queue->Type == QUEUE_TYPE::ADM_QUEUE) ? 0 : queue->QueueID;
     cmd->u.CREATEIOCQ.CDW11.PC = TRUE;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_UnRegIoSubQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -722,6 +786,7 @@ void BuildCmd_UnRegIoSubQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
     cmd->NSID = NVME_CONST::UNSPECIFIC_NSID;
     cmd->u.CREATEIOSQ.CDW10.QID = queue->QueueID;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_UnRegIoCplQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -731,6 +796,7 @@ void BuildCmd_UnRegIoCplQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
     cmd->NSID = NVME_CONST::UNSPECIFIC_NSID;
     cmd->u.CREATEIOSQ.CDW10.QID = queue->QueueID;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_InterruptCoalescing(PSPCNVME_SRBEXT srbext, UCHAR threshold, UCHAR interval)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -742,6 +808,7 @@ void BuildCmd_InterruptCoalescing(PSPCNVME_SRBEXT srbext, UCHAR threshold, UCHAR
     cmd->u.SETFEATURES.CDW11.InterruptCoalescing.THR = threshold;
     cmd->u.SETFEATURES.CDW11.InterruptCoalescing.TIME = interval;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_SetArbitration(PSPCNVME_SRBEXT srbext)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -755,6 +822,7 @@ void BuildCmd_SetArbitration(PSPCNVME_SRBEXT srbext)
     cmd->u.SETFEATURES.CDW11.Arbitration.MPW = NVME_CONST::AB_MPW;
     cmd->u.SETFEATURES.CDW11.Arbitration.LPW = NVME_CONST::AB_LPW;
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_SyncHostTime(PSPCNVME_SRBEXT srbext, LARGE_INTEGER *timestamp)
 {
     UNREFERENCED_PARAMETER(timestamp);
@@ -776,6 +844,7 @@ void BuildCmd_SyncHostTime(PSPCNVME_SRBEXT srbext, LARGE_INTEGER *timestamp)
 
 }
 
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_GetFirmwareSlotsInfo(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_INFO_LOG info)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -792,6 +861,7 @@ void BuildCmd_GetFirmwareSlotsInfo(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_I
     BuildPrp(srbext, cmd, info, sizeof(NVME_FIRMWARE_SLOT_INFO_LOG));
 }
 
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_GetFirmwareSlotsInfoV1(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_INFO_LOG info)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -807,6 +877,7 @@ void BuildCmd_GetFirmwareSlotsInfoV1(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT
     BuildPrp(srbext, cmd, info, sizeof(NVME_FIRMWARE_SLOT_INFO_LOG));
 }
 
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_AdminSecuritySend(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -825,6 +896,7 @@ void BuildCmd_AdminSecuritySend(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
 
     BuildPrp(srbext, cmd, srbext->DataBuf(), srbext->DataBufLen());
 }
+// 概要: 対応する NVMe コマンドを構築します。
 void BuildCmd_AdminSecurityRecv(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -847,6 +919,7 @@ void BuildCmd_AdminSecurityRecv(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
 // 10 バイト CDB の SCSI コマンドを処理します。
 // READ/WRITE/READ CAPACITY/MODE SENSE など、OS が通常のディスクとして認識するための
 // 基本応答を NVMe の名前空間情報や I/O コマンドから生成します。
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Read10(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -856,6 +929,7 @@ UCHAR Scsi_Read10(PSPCNVME_SRBEXT srbext)
     ParseReadWriteOffsetAndLen(cdb->CDB10, offset, len);
     return Scsi_ReadWrite(srbext, offset, len, false);
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Write10(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -866,6 +940,7 @@ UCHAR Scsi_Write10(PSPCNVME_SRBEXT srbext)
     return Scsi_ReadWrite(srbext, offset, len, true);
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ReadCapacity10(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_SUCCESS;
@@ -914,6 +989,7 @@ END:
     srbext->SetTransferLength(ret_size);
     return srb_status;
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Verify10(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -922,12 +998,14 @@ UCHAR Scsi_Verify10(PSPCNVME_SRBEXT srbext)
 
 
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ModeSelect10(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ModeSense10(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -938,12 +1016,14 @@ UCHAR Scsi_ModeSense10(PSPCNVME_SRBEXT srbext)
 
 // 12 バイト CDB の SCSI コマンドを処理します。
 // REPORT LUNS、READ/WRITE12、SECURITY PROTOCOL IN/OUT などを扱います。
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ReportLuns12(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Read12(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -954,6 +1034,7 @@ UCHAR Scsi_Read12(PSPCNVME_SRBEXT srbext)
     return Scsi_ReadWrite(srbext, offset, len, false);
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Write12(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -964,6 +1045,7 @@ UCHAR Scsi_Write12(PSPCNVME_SRBEXT srbext)
     return Scsi_ReadWrite(srbext, offset, len, true);
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Verify12(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -975,6 +1057,7 @@ UCHAR Scsi_Verify12(PSPCNVME_SRBEXT srbext)
 }
 
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_SecurityProtocolIn(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_SUCCESS;
@@ -992,6 +1075,7 @@ UCHAR Scsi_SecurityProtocolIn(PSPCNVME_SRBEXT srbext)
 
     return srb_status;
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_SecurityProtocolOut(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_SUCCESS;
@@ -1012,6 +1096,7 @@ UCHAR Scsi_SecurityProtocolOut(PSPCNVME_SRBEXT srbext)
 
 // 16 バイト CDB の SCSI コマンドを処理します。
 // 大容量ディスクで必要になる READ/WRITE16 と READ CAPACITY16 が中心です。
+// 概要: 応答用構造体へ必要な情報を設定します。
 inline void FillReadCapacityEx(UCHAR lun, PSPCNVME_SRBEXT srbext)
 {
     PREAD_CAPACITY_DATA_EX cap = (PREAD_CAPACITY_DATA_EX)srbext->DataBuf();
@@ -1025,6 +1110,7 @@ inline void FillReadCapacityEx(UCHAR lun, PSPCNVME_SRBEXT srbext)
     REVERSE_BYTES_8(&cap->LogicalBlockAddress.QuadPart, &blocks);
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Read16(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -1035,6 +1121,7 @@ UCHAR Scsi_Read16(PSPCNVME_SRBEXT srbext)
     return Scsi_ReadWrite(srbext, offset, len, false);
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Write16(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -1045,6 +1132,7 @@ UCHAR Scsi_Write16(PSPCNVME_SRBEXT srbext)
     return Scsi_ReadWrite(srbext, offset, len, true);
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Verify16(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -1054,6 +1142,7 @@ UCHAR Scsi_Verify16(PSPCNVME_SRBEXT srbext)
 
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ReadCapacity16(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_SUCCESS;
@@ -1113,6 +1202,7 @@ typedef struct _CDB6_REQUESTSENSE
     }Control;
 }CDB6_REQUESTSENSE, *PCDB6_REQUESTSENSE;
 
+// 概要: SCSI 要求に対する応答バッファを作成します。
 static UCHAR Reply_VpdSupportPages(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
     ULONG buf_size = srbext->DataBufLen();
@@ -1141,6 +1231,7 @@ static UCHAR Reply_VpdSupportPages(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
     RtlCopyMemory(srbext->DataBuf(), page, ret_size);
     return SRB_STATUS_SUCCESS;
 }
+// 概要: SCSI 要求に対する応答バッファを作成します。
 static UCHAR Reply_VpdSerialNumber(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
     PUCHAR buffer = (PUCHAR)srbext->DataBuf();
@@ -1164,6 +1255,7 @@ static UCHAR Reply_VpdSerialNumber(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 
     return SRB_STATUS_SUCCESS;
 }
+// 概要: SCSI 要求に対する応答バッファを作成します。
 static UCHAR Reply_VpdIdentifier(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
     char *subnqn = (char*)srbext->DevExt->CtrlIdent.SUBNQN;
@@ -1197,6 +1289,7 @@ static UCHAR Reply_VpdIdentifier(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 
     return SRB_STATUS_SUCCESS;
 }
+// 概要: SCSI 要求に対する応答バッファを作成します。
 static UCHAR Reply_VpdBlockLimits(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
     ULONG buf_size = sizeof(VPD_BLOCK_LIMITS_PAGE);
@@ -1220,6 +1313,7 @@ static UCHAR Reply_VpdBlockLimits(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 
     return SRB_STATUS_SUCCESS;
 }
+// 概要: SCSI 要求に対する応答バッファを作成します。
 static UCHAR Reply_VpdBlockDeviceCharacteristics(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
     ULONG buf_size = sizeof(VPD_BLOCK_DEVICE_CHARACTERISTICS_PAGE);
@@ -1238,6 +1332,7 @@ static UCHAR Reply_VpdBlockDeviceCharacteristics(PSPCNVME_SRBEXT srbext, ULONG& 
 
     return SRB_STATUS_SUCCESS;
 }
+// 概要: Storport または SCSI のイベントを処理します。
 static UCHAR HandleInquiryVPD(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
     PCDB cdb = srbext->Cdb();
@@ -1267,6 +1362,7 @@ static UCHAR HandleInquiryVPD(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 
     return srb_status;
 }
+// 概要: 要求処理に必要なデータを構築します。
 static void BuildInquiryData(PINQUIRYDATA data, char* vid, char* pid, char* rev)
 {
     data->DeviceType = DIRECT_ACCESS_DEVICE;
@@ -1292,6 +1388,7 @@ static void BuildInquiryData(PINQUIRYDATA data, char* vid, char* pid, char* rev)
     RtlCopyMemory((PUCHAR)&data->ProductRevisionLevel[0], rev, sizeof(data->ProductRevisionLevel));
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_RequestSense6(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -1303,6 +1400,7 @@ UCHAR Scsi_RequestSense6(PSPCNVME_SRBEXT srbext)
 
 
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Read6(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -1312,6 +1410,7 @@ UCHAR Scsi_Read6(PSPCNVME_SRBEXT srbext)
     ParseReadWriteOffsetAndLen(cdb->CDB6READWRITE, offset, len);
     return Scsi_ReadWrite(srbext, offset, len, false);
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Write6(PSPCNVME_SRBEXT srbext)
 {
     ULONG64 offset = 0;
@@ -1321,6 +1420,7 @@ UCHAR Scsi_Write6(PSPCNVME_SRBEXT srbext)
     ParseReadWriteOffsetAndLen(cdb->CDB6READWRITE, offset, len);
     return Scsi_ReadWrite(srbext, offset, len, true);
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Inquiry6(PSPCNVME_SRBEXT srbext) 
 {
     ULONG ret_size = 0;
@@ -1358,11 +1458,13 @@ UCHAR Scsi_Inquiry6(PSPCNVME_SRBEXT srbext)
     SrbSetDataTransferLength(srbext->Srb, ret_size);
     return srb_status;
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_Verify6(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ModeSelect6(PSPCNVME_SRBEXT srbext)
 {
     CDB::_MODE_SELECT *select = &srbext->Cdb()->MODE_SELECT;
@@ -1407,6 +1509,7 @@ UCHAR Scsi_ModeSelect6(PSPCNVME_SRBEXT srbext)
     return SRB_STATUS_SUCCESS;
 }
 
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_ModeSense6(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_ERROR;
@@ -1484,6 +1587,7 @@ end:
     SrbSetDataTransferLength(srbext->Srb, ret_size);
     return srb_status;
 }
+// 概要: 対応する SCSI コマンドを処理します。
 UCHAR Scsi_TestUnitReady(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
@@ -1493,6 +1597,7 @@ UCHAR Scsi_TestUnitReady(PSPCNVME_SRBEXT srbext)
 // NVMe Completion Status を Storport/SCSI の SRB_STATUS へ翻訳します。
 // 上位スタックは NVMe の詳細コードを直接理解しないため、意味の近い SRB_STATUS と
 // Sense 情報へ寄せて返します。
+// 概要: NVMe の状態や完了コードを変換します。
 UCHAR NvmeGenericToSrbStatus(NVME_COMMAND_STATUS &status)
 {
     switch(status.SC)
@@ -1549,11 +1654,13 @@ UCHAR NvmeGenericToSrbStatus(NVME_COMMAND_STATUS &status)
     
     return SRB_STATUS_ERROR;
 }
+// 概要: NVMe の状態や完了コードを変換します。
 UCHAR NvmeCmdSpecificToSrbStatus(NVME_COMMAND_STATUS &status)
 {
     UNREFERENCED_PARAMETER(status);
     return SRB_STATUS_ERROR;
 }
+// 概要: NVMe の状態や完了コードを変換します。
 UCHAR NvmeMediaErrorToSrbStatus(NVME_COMMAND_STATUS &status)
 {
     UNREFERENCED_PARAMETER(status);
@@ -1696,6 +1803,7 @@ typedef enum {
 // SRB_STATUS と SCSI Sense Data の補助処理です。
 // エラー時に単に SRB_STATUS_ERROR を返すだけでは原因が伝わりにくいため、
 // 必要に応じて Sense Key/ASC/ASCQ を補います。
+// 概要: NVMe の状態や完了コードを変換します。
 UCHAR NvmeToSrbStatus(NVME_COMMAND_STATUS& status)
 {
     if(0 == (status.SCT & status.SC))
@@ -1712,6 +1820,7 @@ UCHAR NvmeToSrbStatus(NVME_COMMAND_STATUS& status)
     }
     return SRB_STATUS_INTERNAL_ERROR;
 }
+// 概要: デバイスまたは内部設定を更新します。
 void SetScsiSenseBySrbStatus(PSTORAGE_REQUEST_BLOCK srb, UCHAR &status)
 {
     switch (status)
@@ -1754,6 +1863,7 @@ void SetScsiSenseBySrbStatus(PSTORAGE_REQUEST_BLOCK srb, UCHAR &status)
 // StorPortInitialize で OS のストレージスタックへ登録します。
 EXTERN_C_START
 sp_DRIVER_INITIALIZE DriverEntry;
+// 概要: ドライバを Storport ミニポートとして初期登録します。
 ULONG DriverEntry(IN PVOID DrvObj, IN PVOID RegPath)
 {
     CDebugCallInOut inout(__FUNCTION__);
@@ -1801,6 +1911,7 @@ EXTERN_C_END
 // Storport から直接呼ばれるミニポートコールバック群です。
 // アダプタ検出、初期化、I/O 受付、リセット、PnP/電源制御、トレースなど、
 // ドライバの外向きの振る舞いはこのセクションが中心です。
+// 概要: 応答用構造体へ必要な情報を設定します。
 static void FillPortConfiguration(PPORT_CONFIGURATION_INFORMATION portcfg, CNvmeDevice* nvme)
 {
     portcfg->MaximumTransferLength = nvme->MaxTxSize;
@@ -1888,6 +1999,7 @@ _Use_decl_annotations_ BOOLEAN HwInitialize(PVOID devext)
     return TRUE;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 BOOLEAN HwPassiveInitialize(PVOID devext)
 {
@@ -1920,6 +2032,7 @@ BOOLEAN HwPassiveInitialize(PVOID devext)
     return TRUE;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 BOOLEAN HwBuildIo(_In_ PVOID devext,_In_ PSCSI_REQUEST_BLOCK srb)
 {
@@ -1956,6 +2069,7 @@ BOOLEAN HwBuildIo(_In_ PVOID devext,_In_ PSCSI_REQUEST_BLOCK srb)
     return need_startio;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 BOOLEAN HwStartIo(PVOID devext, PSCSI_REQUEST_BLOCK srb)
 {
@@ -1982,6 +2096,7 @@ BOOLEAN HwStartIo(PVOID devext, PSCSI_REQUEST_BLOCK srb)
     return TRUE;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 BOOLEAN HwResetBus(
     PVOID DeviceExtension,
@@ -1995,6 +2110,7 @@ BOOLEAN HwResetBus(
     return TRUE;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 SCSI_ADAPTER_CONTROL_STATUS HwAdapterControl(
     PVOID DeviceExtension,
@@ -2057,6 +2173,7 @@ SCSI_ADAPTER_CONTROL_STATUS HwAdapterControl(
     return status;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 void HwProcessServiceRequest(
     PVOID DeviceExtension,
@@ -2073,6 +2190,7 @@ void HwProcessServiceRequest(
     StorPortCompleteServiceIrp(DeviceExtension, irp);
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 void HwCompleteServiceIrp(PVOID DeviceExtension)
 {
@@ -2082,6 +2200,7 @@ void HwCompleteServiceIrp(PVOID DeviceExtension)
     UNREFERENCED_PARAMETER(DeviceExtension);
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 SCSI_UNIT_CONTROL_STATUS HwUnitControl(
     _In_ PVOID DeviceExtension,
@@ -2098,6 +2217,7 @@ SCSI_UNIT_CONTROL_STATUS HwUnitControl(
     return ScsiUnitControlSuccess;
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 VOID HwTracingEnabled(
     _In_ PVOID HwDeviceExtension,
@@ -2109,6 +2229,7 @@ VOID HwTracingEnabled(
 
 }
 
+// 概要: Storport から呼ばれるミニポートコールバックを処理します。
 _Use_decl_annotations_
 VOID HwCleanupTracing(
     _In_ PVOID  Arg1
@@ -2120,6 +2241,7 @@ VOID HwCleanupTracing(
 // NVMe コントローラを表す CNvmeDevice の実装です。
 // PCI BAR のマップ、レジスタアクセス、Admin Queue/IO Queue の作成、Identify、
 // Feature 設定、リセット、シャットダウンまでを管理します。
+// 概要: NVMe の状態や完了コードを変換します。
 BOOLEAN CNvmeDevice::NvmeMsixISR(IN PVOID devext, IN ULONG msgid)
 {
     CNvmeDevice* nvme = (CNvmeDevice*)devext;
@@ -2132,6 +2254,7 @@ BOOLEAN CNvmeDevice::NvmeMsixISR(IN PVOID devext, IN ULONG msgid)
 END:
     return TRUE;
 }
+// 概要: RestartAdapterDpc の処理を行います。
 void CNvmeDevice::RestartAdapterDpc(
     IN PSTOR_DPC  Dpc,
     IN PVOID  DevExt,
@@ -2150,6 +2273,7 @@ void CNvmeDevice::RestartAdapterDpc(
     stor_status = StorPortQueueWorkItem(DevExt, CNvmeDevice::RestartAdapterWorker, nvme->RestartWorker, NULL);
     ASSERT(stor_status == STOR_STATUS_SUCCESS);
 }
+// 概要: RestartAdapterWorker の処理を行います。
 void CNvmeDevice::RestartAdapterWorker(
     _In_ PVOID DevExt,
     _In_ PVOID Context,
@@ -2174,30 +2298,35 @@ void CNvmeDevice::RestartAdapterWorker(
 }
 
 #pragma region ======== CSpcNvmeDevice inline routines ======== 
+// 概要: レジスタまたはデバイス情報を読み取ります。
 inline void CNvmeDevice::ReadNvmeRegister(NVME_CONTROLLER_CONFIGURATION& cc, bool barrier)
 {
     if(barrier)
         MemoryBarrier();
     cc.AsUlong = StorPortReadRegisterUlong(this, &CtrlReg->CC.AsUlong);
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 inline void CNvmeDevice::ReadNvmeRegister(NVME_CONTROLLER_STATUS& csts, bool barrier)
 {
     if (barrier)
         MemoryBarrier();
     csts.AsUlong = StorPortReadRegisterUlong(this, &CtrlReg->CSTS.AsUlong);
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 inline void CNvmeDevice::ReadNvmeRegister(NVME_VERSION& ver, bool barrier)
 {
     if (barrier)
         MemoryBarrier();
     ver.AsUlong = StorPortReadRegisterUlong(this, &CtrlReg->VS.AsUlong);
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 inline void CNvmeDevice::ReadNvmeRegister(NVME_CONTROLLER_CAPABILITIES& cap, bool barrier)
 {
     if (barrier)
         MemoryBarrier();
     cap.AsUlonglong = StorPortReadRegisterUlong64(this, &CtrlReg->CAP.AsUlonglong);
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 inline void CNvmeDevice::ReadNvmeRegister(NVME_ADMIN_QUEUE_ATTRIBUTES& aqa,
     NVME_ADMIN_SUBMISSION_QUEUE_BASE_ADDRESS& asq,
     NVME_ADMIN_COMPLETION_QUEUE_BASE_ADDRESS& acq,
@@ -2210,18 +2339,21 @@ inline void CNvmeDevice::ReadNvmeRegister(NVME_ADMIN_QUEUE_ATTRIBUTES& aqa,
     asq.AsUlonglong = StorPortReadRegisterUlong64(this, &CtrlReg->ASQ.AsUlonglong);
     acq.AsUlonglong = StorPortReadRegisterUlong64(this, &CtrlReg->ACQ.AsUlonglong);
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 inline void CNvmeDevice::WriteNvmeRegister(NVME_CONTROLLER_CONFIGURATION& cc, bool barrier)
 {
     if (barrier)
         MemoryBarrier();
     StorPortWriteRegisterUlong(this, &CtrlReg->CC.AsUlong, cc.AsUlong);
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 inline void CNvmeDevice::WriteNvmeRegister(NVME_CONTROLLER_STATUS& csts, bool barrier)
 {
     if (barrier)
         MemoryBarrier();
     StorPortWriteRegisterUlong(this, &CtrlReg->CSTS.AsUlong, csts.AsUlong);
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 inline void CNvmeDevice::WriteNvmeRegister(NVME_ADMIN_QUEUE_ATTRIBUTES& aqa,
     NVME_ADMIN_SUBMISSION_QUEUE_BASE_ADDRESS& asq,
     NVME_ADMIN_COMPLETION_QUEUE_BASE_ADDRESS& acq,
@@ -2234,22 +2366,26 @@ inline void CNvmeDevice::WriteNvmeRegister(NVME_ADMIN_QUEUE_ATTRIBUTES& aqa,
     StorPortWriteRegisterUlong64(this, &CtrlReg->ASQ.AsUlonglong, asq.AsUlonglong);
     StorPortWriteRegisterUlong64(this, &CtrlReg->ACQ.AsUlonglong, acq.AsUlonglong);
 }
+// 概要: 指定条件を満たすかどうかを判定します。
 inline BOOLEAN CNvmeDevice::IsControllerEnabled(bool barrier)
 {
     NVME_CONTROLLER_CONFIGURATION cc = {0};
     ReadNvmeRegister(cc, barrier);
     return (TRUE == cc.EN)?TRUE:FALSE;
 }
+// 概要: 指定条件を満たすかどうかを判定します。
 inline BOOLEAN CNvmeDevice::IsControllerReady(bool barrier)
 {
     NVME_CONTROLLER_STATUS csts = { 0 };
     ReadNvmeRegister(csts, barrier);
     return (TRUE == csts.RDY && FALSE == csts.CFS) ? TRUE : FALSE;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 inline void CNvmeDevice::GetAdmQueueDbl(PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL& sub, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL& cpl)
 {
     GetQueueDbl(0, sub, cpl);
 }
+// 概要: 内部状態やデバイス情報を取得します。
 inline void CNvmeDevice::GetQueueDbl(ULONG qid, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL& sub, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL& cpl)
 {
     if (NULL == Doorbells)
@@ -2262,45 +2398,56 @@ inline void CNvmeDevice::GetQueueDbl(ULONG qid, PNVME_SUBMISSION_QUEUE_TAIL_DOOR
     sub = (PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL)&Doorbells[qid*2];
     cpl = (PNVME_COMPLETION_QUEUE_HEAD_DOORBELL)&Doorbells[qid*2+1];
 }
+// 概要: デバイス能力から内部キャッシュ値を更新します。
 inline void CNvmeDevice::UpdateMaxTxSize()
 {
     this->MaxTxSize = (ULONG)((1 << this->CtrlIdent.MDTS) * this->MinPageSize);
     this->MaxTxPages = (ULONG)(this->MaxTxSize / PAGE_SIZE);
 }
 #if 0
+// 概要: MinPageSize の処理を行います。
 ULONG CNvmeDevice::MinPageSize()
 {
     return (ULONG)(1 << (12 + CtrlCap.MPSMIN));
 }
+// 概要: MaxPageSize の処理を行います。
 ULONG CNvmeDevice::MaxPageSize()
 {
     return (ULONG)(1 << (12 + CtrlCap.MPSMAX));
 }
+// 概要: MaxTxSize の処理を行います。
 ULONG CNvmeDevice::MaxTxSize()
 {
     return (ULONG)((1 << this->CtrlIdent.MDTS) * MinPageSize());
 }
+// 概要: MaxTxPages の処理を行います。
 ULONG CNvmeDevice::MaxTxPages()
 {
     return (ULONG)(MaxTxSize() / PAGE_SIZE);
 }
+// 概要: NsCount の処理を行います。
 ULONG CNvmeDevice::NsCount()
 {
     return NamespaceCount;
 }
 #endif
 bool CNvmeDevice::IsWorking() { return (State == NVME_STATE::RUNNING); }
+// 概要: return の処理を行います。
 bool CNvmeDevice::IsSetup() { return (State == NVME_STATE::SETUP); }
+// 概要: return の処理を行います。
 bool CNvmeDevice::IsTeardown() { return (State == NVME_STATE::TEARDOWN); }
+// 概要: return の処理を行います。
 bool CNvmeDevice::IsStop() { return (State == NVME_STATE::STOP); }
 #pragma endregion
 
 #pragma region ======== CSpcNvmeDevice ======== 
 #if 0
+// 概要: 内部状態やデバイス情報を取得します。
 bool CNvmeDevice::GetMsixTable()
 {
 }
 #endif 
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::Setup(PPORT_CONFIGURATION_INFORMATION pci)
 {
     NTSTATUS status = STATUS_SUCCESS;
@@ -2328,6 +2475,7 @@ NTSTATUS CNvmeDevice::Setup(PPORT_CONFIGURATION_INFORMATION pci)
     State = NVME_STATE::RUNNING;
     return STATUS_SUCCESS;
 }
+// 概要: デバイスまたはキューの終了処理を行います。
 void CNvmeDevice::Teardown()
 {
     if (!IsWorking())
@@ -2338,6 +2486,7 @@ void CNvmeDevice::Teardown()
     DeleteAdmQ();
     State = NVME_STATE::STOP;
 }
+// 概要: EnableController の処理を行います。
 NTSTATUS CNvmeDevice::EnableController()
 {
         return STATUS_SUCCESS;
@@ -2366,6 +2515,7 @@ NTSTATUS CNvmeDevice::EnableController()
         return STATUS_INTERNAL_ERROR;
     return STATUS_SUCCESS;
 }
+// 概要: DisableController の処理を行います。
 NTSTATUS CNvmeDevice::DisableController()
 {
 
@@ -2389,6 +2539,7 @@ NTSTATUS CNvmeDevice::DisableController()
     return STATUS_SUCCESS;
 }
 
+// 概要: ShutdownController の処理を行います。
 NTSTATUS CNvmeDevice::ShutdownController()
 {
     if (!IsStop() && !IsWorking())
@@ -2414,6 +2565,7 @@ ERROR_BSOD:
     ReadNvmeRegister(csts);
     KeBugCheckEx(BUGCHECK_ADAPTER, (ULONG_PTR)this, (ULONG_PTR)cc.AsUlong, (ULONG_PTR)csts.AsUlong, 0);
 }
+// 概要: 内部変数やデバイス状態を初期化します。
 NTSTATUS CNvmeDevice::InitController()
 {
         return STATUS_INVALID_DEVICE_STATE;
@@ -2431,6 +2583,7 @@ NTSTATUS CNvmeDevice::InitController()
     status = EnableController();
     return status;
 }
+// 概要: 内部変数やデバイス状態を初期化します。
 NTSTATUS CNvmeDevice::InitNvmeStage1()
 {
     NTSTATUS status = STATUS_SUCCESS;
@@ -2449,6 +2602,7 @@ NTSTATUS CNvmeDevice::InitNvmeStage1()
 
     return status;
 }
+// 概要: 内部変数やデバイス状態を初期化します。
 NTSTATUS CNvmeDevice::InitNvmeStage2()
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -2467,6 +2621,7 @@ NTSTATUS CNvmeDevice::InitNvmeStage2()
     status = SetAsyncEvent();
     return status;
 }
+// 概要: RestartController の処理を行います。
 NTSTATUS CNvmeDevice::RestartController()
 {
     BOOLEAN ok = FALSE;
@@ -2479,6 +2634,7 @@ NTSTATUS CNvmeDevice::RestartController()
     ASSERT(ok);
     return STATUS_SUCCESS;
 }
+// 概要: IdentifyAllNamespaces の処理を行います。
 NTSTATUS CNvmeDevice::IdentifyAllNamespaces()
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -2501,6 +2657,7 @@ NTSTATUS CNvmeDevice::IdentifyAllNamespaces()
     }
     return STATUS_SUCCESS;
 }
+// 概要: IdentifyFirstNamespace の処理を行います。
 NTSTATUS CNvmeDevice::IdentifyFirstNamespace()
 {
     NTSTATUS status = IdentifyNamespace(NULL, 1, &this->NsData[0]);
@@ -2508,6 +2665,7 @@ NTSTATUS CNvmeDevice::IdentifyFirstNamespace()
         NamespaceCount = 1;
     return status;
 }
+// 概要: NVMe キューまたは関連リソースを作成します。
 NTSTATUS CNvmeDevice::CreateIoQueues(bool force)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -2523,6 +2681,7 @@ NTSTATUS CNvmeDevice::CreateIoQueues(bool force)
     status = CreateIoQ();
     return status;
 }
+// 概要: IdentifyController の処理を行います。
 NTSTATUS CNvmeDevice::IdentifyController(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA ident, bool poll)
 {
         return STATUS_INVALID_DEVICE_STATE;
@@ -2563,6 +2722,7 @@ NTSTATUS CNvmeDevice::IdentifyController(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_
 END:
     return status;
 }
+// 概要: IdentifyNamespace の処理を行います。
 NTSTATUS CNvmeDevice::IdentifyNamespace(PSPCNVME_SRBEXT srbext, ULONG nsid, PNVME_IDENTIFY_NAMESPACE_DATA data)
 {
     if (!IsWorking())
@@ -2595,6 +2755,7 @@ NTSTATUS CNvmeDevice::IdentifyNamespace(PSPCNVME_SRBEXT srbext, ULONG nsid, PNVM
 END:
     return status;
 }
+// 概要: IdentifyActiveNamespaceIdList の処理を行います。
 NTSTATUS CNvmeDevice::IdentifyActiveNamespaceIdList(PSPCNVME_SRBEXT srbext, PVOID nsid_list, ULONG& ret_count)
 {
     if (!IsWorking())
@@ -2637,6 +2798,7 @@ NTSTATUS CNvmeDevice::IdentifyActiveNamespaceIdList(PSPCNVME_SRBEXT srbext, PVOI
 
     return STATUS_SUCCESS;
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetNumberOfIoQueue(USHORT count)
 {
     if (!IsWorking())
@@ -2668,6 +2830,7 @@ END:
 
     return status;
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetInterruptCoalescing()
 {
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "SetAsyncEvent() still not implemented yet!!\n");
@@ -2699,6 +2862,7 @@ NTSTATUS CNvmeDevice::SetInterruptCoalescing()
     return status;
 #endif
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetAsyncEvent()
 {
     if (!IsWorking())
@@ -2707,6 +2871,7 @@ NTSTATUS CNvmeDevice::SetAsyncEvent()
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "SetAsyncEvent() still not implemented yet!!\n");
     return STATUS_SUCCESS;
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetArbitration()
 {
     if (!IsWorking())
@@ -2715,6 +2880,7 @@ NTSTATUS CNvmeDevice::SetArbitration()
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "SetArbitration() still not implemented yet!!\n");
     return STATUS_SUCCESS;
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetSyncHostTime()
 {
     if (!IsWorking())
@@ -2723,6 +2889,7 @@ NTSTATUS CNvmeDevice::SetSyncHostTime()
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "SetSyncHostTime() still not implemented yet!!\n");
     return STATUS_SUCCESS;
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetPowerManagement()
 {
     if (!IsWorking())
@@ -2731,6 +2898,7 @@ NTSTATUS CNvmeDevice::SetPowerManagement()
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "SetPowerManagement() still not implemented yet!!\n");
     return STATUS_SUCCESS;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 NTSTATUS CNvmeDevice::GetLbaFormat(ULONG nsid, NVME_LBA_FORMAT& format)
 {
     if (0 == nsid)
@@ -2743,6 +2911,7 @@ NTSTATUS CNvmeDevice::GetLbaFormat(ULONG nsid, NVME_LBA_FORMAT& format)
     RtlCopyMemory(&format, &NsData[nsid - 1].LBAF[lba_index], sizeof(NVME_LBA_FORMAT));
     return STATUS_SUCCESS;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 NTSTATUS CNvmeDevice::GetNamespaceBlockSize(ULONG nsid, ULONG& size)
 {
     if (0 == nsid)
@@ -2755,6 +2924,7 @@ NTSTATUS CNvmeDevice::GetNamespaceBlockSize(ULONG nsid, ULONG& size)
     size = (1 << NsData[nsid - 1].LBAF[lba_index].LBADS);
     return STATUS_SUCCESS;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 NTSTATUS CNvmeDevice::GetNamespaceTotalBlocks(ULONG nsid, ULONG64& blocks)
 {
     if (0 == nsid)
@@ -2766,12 +2936,14 @@ NTSTATUS CNvmeDevice::GetNamespaceTotalBlocks(ULONG nsid, ULONG64& blocks)
     blocks = NsData[nsid - 1].NSZE;
     return STATUS_SUCCESS;
 }
+// 概要: 構築済みコマンドを NVMe キューへ投入します。
 NTSTATUS CNvmeDevice::SubmitAdmCmd(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd)
 {
     if(!IsWorking() || NULL == AdmQueue)
         return STATUS_DEVICE_NOT_READY;
     return AdmQueue->SubmitCmd(srbext, cmd);
 }
+// 概要: 構築済みコマンドを NVMe キューへ投入します。
 NTSTATUS CNvmeDevice::SubmitIoCmd(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd)
 {
     if (!IsWorking() || NULL == IoQueue)
@@ -2781,6 +2953,7 @@ NTSTATUS CNvmeDevice::SubmitIoCmd(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd)
     srbext->IoQueueIndex = (cpu_idx % RegisteredIoQ);
     return IoQueue[srbext->IoQueueIndex]->SubmitCmd(srbext, cmd);
 }
+// 概要: 内部状態や未完了要求を初期状態へ戻します。
 void CNvmeDevice::ResetOutstandingCmds()
 {
     if (!IsWorking() || NULL == IoQueue || NULL == AdmQueue)
@@ -2793,6 +2966,7 @@ void CNvmeDevice::ResetOutstandingCmds()
 
     State = NVME_STATE::RUNNING;
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeDevice::SetPerfOpts()
 {
     if (!IsWorking())
@@ -2831,6 +3005,7 @@ NTSTATUS CNvmeDevice::SetPerfOpts()
 
     return STATUS_SUCCESS;
 }
+// 概要: 指定条件を満たすかどうかを判定します。
 bool CNvmeDevice::IsInValidIoRange(ULONG nsid, ULONG64 offset, ULONG len)
 {
     if (0 == nsid || 0 == NamespaceCount)
@@ -2847,6 +3022,7 @@ bool CNvmeDevice::IsInValidIoRange(ULONG nsid, ULONG64 offset, ULONG len)
         return false;
     return true;
 }
+// 概要: 作成済みキューを NVMe コントローラへ登録します。
 NTSTATUS CNvmeDevice::RegisterIoQueues(PSPCNVME_SRBEXT srbext)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -2911,6 +3087,7 @@ END:
     }
     return status;
 }
+// 概要: NVMe コントローラからキュー登録を解除します。
 NTSTATUS CNvmeDevice::UnregisterIoQueues(PSPCNVME_SRBEXT srbext)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -2979,6 +3156,7 @@ END:
     return status;
 }
 
+// 概要: NVMe キューまたは関連リソースを作成します。
 NTSTATUS CNvmeDevice::CreateAdmQ()
 {
     if(NULL != AdmQueue)
@@ -2997,6 +3175,7 @@ NTSTATUS CNvmeDevice::CreateAdmQ()
         return STATUS_MEMORY_NOT_ALLOCATED;
     return STATUS_SUCCESS;
 }
+// 概要: 作成済みキューを NVMe コントローラへ登録します。
 NTSTATUS CNvmeDevice::RegisterAdmQ()
 {
     if(IsControllerReady() || NULL == AdmQueue)
@@ -3022,6 +3201,7 @@ NTSTATUS CNvmeDevice::RegisterAdmQ()
     WriteNvmeRegister(aqa, asq, acq);
     return STATUS_SUCCESS;
 }
+// 概要: NVMe コントローラからキュー登録を解除します。
 NTSTATUS CNvmeDevice::UnregisterAdmQ()
 {
     if (IsControllerReady())
@@ -3037,6 +3217,7 @@ NTSTATUS CNvmeDevice::UnregisterAdmQ()
     WriteNvmeRegister(aqa, asq, acq);
     return STATUS_SUCCESS;
 }
+// 概要: NVMe キューまたは関連リソースを削除します。
 NTSTATUS CNvmeDevice::DeleteAdmQ()
 {
     if(NULL == AdmQueue)
@@ -3047,6 +3228,7 @@ NTSTATUS CNvmeDevice::DeleteAdmQ()
     AdmQueue = NULL;
     return STATUS_SUCCESS;
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 void CNvmeDevice::ReadCtrlCap()
 {
     
@@ -3063,6 +3245,7 @@ void CNvmeDevice::ReadCtrlCap()
     AdmDepth = min((USHORT)CtrlCap.MQES + 1, AdmDepth);
     IoDepth = min((USHORT)CtrlCap.MQES + 1, IoDepth);
 }
+// 概要: PCI リソースを仮想アドレスへマップします。
 bool CNvmeDevice::MapCtrlRegisters()
 {
     BOOLEAN in_iospace = FALSE;
@@ -3093,6 +3276,7 @@ bool CNvmeDevice::MapCtrlRegisters()
 
     return false;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 bool CNvmeDevice::GetPciBusData(INTERFACE_TYPE type, ULONG bus, ULONG slot)
 {
     ULONG size = sizeof(PciCfg);
@@ -3105,6 +3289,7 @@ bool CNvmeDevice::GetPciBusData(INTERFACE_TYPE type, ULONG bus, ULONG slot)
     DeviceID = PciCfg.DeviceID;
     return true;
 }
+// 概要: コントローラ状態が期待値になるまで待機します。
 bool CNvmeDevice::WaitForCtrlerState(ULONG time_us, BOOLEAN csts_rdy)
 {
     ULONG elapsed = 0;
@@ -3122,6 +3307,7 @@ bool CNvmeDevice::WaitForCtrlerState(ULONG time_us, BOOLEAN csts_rdy)
 
     return true;
 }
+// 概要: コントローラ状態が期待値になるまで待機します。
 bool CNvmeDevice::WaitForCtrlerState(ULONG time_us, BOOLEAN csts_rdy, BOOLEAN cc_en)
 {
     ULONG elapsed = 0;
@@ -3141,6 +3327,7 @@ bool CNvmeDevice::WaitForCtrlerState(ULONG time_us, BOOLEAN csts_rdy, BOOLEAN cc
 
     return true;
 }
+// 概要: コントローラ状態が期待値になるまで待機します。
 bool CNvmeDevice::WaitForCtrlerShst(ULONG time_us)
 {
     ULONG elapsed = 0;
@@ -3163,6 +3350,7 @@ bool CNvmeDevice::WaitForCtrlerShst(ULONG time_us)
 
     return true;
 }
+// 概要: 内部変数やデバイス状態を初期化します。
 void CNvmeDevice::InitVars()
 {
     CtrlReg = NULL;
@@ -3210,6 +3398,7 @@ void CNvmeDevice::InitVars()
 
     StorPortInitializeDpc(this, &this->RestartDpc, CNvmeDevice::RestartAdapterDpc);
 }
+// 概要: レジストリからドライバ設定を読み込みます。
 void CNvmeDevice::LoadRegistry()
 {
     ULONG size = sizeof(ULONG);
@@ -3257,6 +3446,7 @@ void CNvmeDevice::LoadRegistry()
 
     StorPortFreeRegistryBuffer(this, buffer);
 }
+// 概要: NVMe キューまたは関連リソースを作成します。
 NTSTATUS CNvmeDevice::CreateIoQ()
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -3286,6 +3476,7 @@ NTSTATUS CNvmeDevice::CreateIoQ()
 
     return STATUS_SUCCESS;
 }
+// 概要: NVMe キューまたは関連リソースを削除します。
 NTSTATUS CNvmeDevice::DeleteIoQ()
 {
     for(CNvmeQueue* &queue : IoQueue)
@@ -3307,6 +3498,7 @@ NTSTATUS CNvmeDevice::DeleteIoQ()
 
 // NVMe Submission Queue / Completion Queue の管理実装です。
 // Command ID の割り当て、Doorbell 更新、Completion Entry の回収、SRB 完了通知を担います。
+// 概要: CalcQueueBufferSize の処理を行います。
 static __inline size_t CalcQueueBufferSize(USHORT depth)
 {
     size_t page_count = BYTES_TO_PAGES(depth * sizeof(NVME_COMMAND)) +
@@ -3314,6 +3506,7 @@ static __inline size_t CalcQueueBufferSize(USHORT depth)
     return page_count * PAGE_SIZE;
 }
 
+// 概要: レジスタまたはデバイス情報を読み取ります。
 static __inline ULONG ReadDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL dbl)
 {
 #if !defined(DBG)
@@ -3322,6 +3515,7 @@ static __inline ULONG ReadDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL
 #endif
     return StorPortReadRegisterUlong(devext, &dbl->AsUlong);
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 static __inline ULONG ReadDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL dbl)
 {
 #if !defined(DBG)
@@ -3330,6 +3524,7 @@ static __inline ULONG ReadDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL
 #endif
     return StorPortReadRegisterUlong(devext, &dbl->AsUlong);
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 static __inline void WriteDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL dbl, ULONG value)
 {
 #if !defined(DBG)
@@ -3338,6 +3533,7 @@ static __inline void WriteDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL
     MemoryBarrier();
     StorPortWriteRegisterUlong(devext, &dbl->AsUlong, value);
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 static __inline void WriteDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL dbl, ULONG value)
 {
 #if !defined(DBG)
@@ -3346,20 +3542,24 @@ static __inline void WriteDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL
 #endif
     StorPortWriteRegisterUlong(devext, &dbl->AsUlong, value);
 }
+// 概要: 指定条件を満たすかどうかを判定します。
 static __inline bool IsValidQid(ULONG qid)
 {
     return (qid != NVME_INVALID_QID);
 }
+// 概要: NewCplArrived の処理を行います。
 static __inline bool NewCplArrived(PNVME_COMPLETION_ENTRY entry, USHORT current_tag)
 {
     if (entry->DW3.Status.P == current_tag)
         return true;
     return false;
 }
+// 概要: デバイス能力から内部キャッシュ値を更新します。
 static __inline void UpdateCplHead(ULONG &cpl_head, USHORT depth)
 {
     cpl_head = (cpl_head + 1) % depth;
 }
+// 概要: デバイス能力から内部キャッシュ値を更新します。
 static __inline void UpdateCplHeadAndPhase(ULONG& cpl_head, USHORT& phase, USHORT depth)
 {
     UpdateCplHead(cpl_head, depth);
@@ -3368,6 +3568,7 @@ static __inline void UpdateCplHeadAndPhase(ULONG& cpl_head, USHORT& phase, USHOR
 }
 #pragma region ======== class CNvmeQueue ========
 
+// 概要: QueueCplDpcRoutine の処理を行います。
 VOID CNvmeQueue::QueueCplDpcRoutine(
     _In_ PSTOR_DPC dpc,
     _In_ PVOID devext,
@@ -3382,19 +3583,23 @@ VOID CNvmeQueue::QueueCplDpcRoutine(
     queue->CompleteCmd();
 }
 
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CNvmeQueue::CNvmeQueue()
 {
     KeInitializeSpinLock(&SubLock);
 }
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CNvmeQueue::CNvmeQueue(QUEUE_PAIR_CONFIG* config)
     : CNvmeQueue()
 {
     Setup(config);
 }
+// 概要: オブジェクトの終了処理と保持リソースの解放を行います。
 CNvmeQueue::~CNvmeQueue()
 {
     Teardown();
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CNvmeQueue::Setup(QUEUE_PAIR_CONFIG* config)
 {
     bool ok = false;
@@ -3446,12 +3651,14 @@ ERROR:
     Teardown();
     return status;
 }
+// 概要: デバイスまたはキューの終了処理を行います。
 void CNvmeQueue::Teardown()
 {
     this->IsReady = false;
     DeallocQueueBuffer();
     History.Teardown();
 }
+// 概要: 構築済みコマンドを NVMe キューへ投入します。
 NTSTATUS CNvmeQueue::SubmitCmd(SPCNVME_SRBEXT* srbext, PNVME_COMMAND src_cmd)
 {
     CSpinLock lock(&SubLock);
@@ -3488,6 +3695,7 @@ NTSTATUS CNvmeQueue::SubmitCmd(SPCNVME_SRBEXT* srbext, PNVME_COMMAND src_cmd)
 
     return STATUS_SUCCESS;
 }
+// 概要: 内部状態や未完了要求を初期状態へ戻します。
 void CNvmeQueue::ResetAllCmd()
 {
     CSpinLock lock(&SubLock);
@@ -3498,6 +3706,7 @@ void CNvmeQueue::ResetAllCmd()
         UpdateCplHeadAndPhase(CplHead, PhaseTag, Depth);
     }
 }
+// 概要: コマンド完了後の後処理と SRB 完了通知を行います。
 void CNvmeQueue::CompleteCmd(ULONG max_count)
 {
     PNVME_COMPLETION_ENTRY cpl = &CplQ_VA[CplHead];
@@ -3537,6 +3746,7 @@ void CNvmeQueue::CompleteCmd(ULONG max_count)
     if(update_count != 0)
         WriteDbl(DevExt, CplDbl, CplHead);
 }
+// 概要: 内部状態やデバイス情報を取得します。
 void CNvmeQueue::GetQueueAddr(PVOID* subq, PVOID* cplq)
 {  
     if(subq != NULL)
@@ -3545,28 +3755,34 @@ void CNvmeQueue::GetQueueAddr(PVOID* subq, PVOID* cplq)
     if (cplq != NULL)
         *cplq = CplQ_VA;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 void CNvmeQueue::GetQueueAddr(PVOID* subva, PHYSICAL_ADDRESS* subpa, PVOID* cplva, PHYSICAL_ADDRESS* cplpa)
 {
     GetQueueAddr(subva, cplva);
     GetQueueAddr(subpa, cplpa);
 }
+// 概要: 内部状態やデバイス情報を取得します。
 void CNvmeQueue::GetQueueAddr(PHYSICAL_ADDRESS* subq, PHYSICAL_ADDRESS* cplq)
 {
     GetSubQAddr(subq);
     GetCplQAddr(cplq);
 }
+// 概要: 内部状態やデバイス情報を取得します。
 void CNvmeQueue::GetSubQAddr(PHYSICAL_ADDRESS* subq)
 {
     subq->QuadPart = SubQ_PA.QuadPart;
 }
+// 概要: 内部状態やデバイス情報を取得します。
 void CNvmeQueue::GetCplQAddr(PHYSICAL_ADDRESS* cplq)
 {
     cplq->QuadPart = CplQ_PA.QuadPart;
 }
+// 概要: 指定条件を満たすかどうかを判定します。
 bool CNvmeQueue::IsSafeForSubmit()
 {
     return ((Depth - NVME_CONST::SAFE_SUBMIT_THRESHOLD) > (USHORT)InflightCmds)? true : false;
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 ULONG CNvmeQueue::ReadSubTail()
 {
     if (IsValidQid(QueueID) && NULL != SubDbl)
@@ -3574,12 +3790,14 @@ ULONG CNvmeQueue::ReadSubTail()
     KdBreakPoint();
     return NVME_CONST::INVALID_DBL_VALUE;
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 void CNvmeQueue::WriteSubTail(ULONG value)
 {
     if (IsValidQid(QueueID) && NULL != SubDbl)
         return WriteDbl(DevExt, SubDbl, value);
     KdBreakPoint();
 }
+// 概要: レジスタまたはデバイス情報を読み取ります。
 ULONG CNvmeQueue::ReadCplHead()
 {
     if (IsValidQid(QueueID) && NULL != CplDbl)
@@ -3587,6 +3805,7 @@ ULONG CNvmeQueue::ReadCplHead()
     KdBreakPoint();
     return NVME_CONST::INVALID_DBL_VALUE;
 }
+// 概要: レジスタまたはデバイス状態へ値を書き込みます。
 void CNvmeQueue::WriteCplHead(ULONG value)
 {
     if (IsValidQid(QueueID) && NULL != CplDbl)
@@ -3594,6 +3813,7 @@ void CNvmeQueue::WriteCplHead(ULONG value)
     KdBreakPoint();
 }
 
+// 概要: キュー処理に必要なメモリを確保します。
 bool CNvmeQueue::AllocQueueBuffer()
 {
     PHYSICAL_ADDRESS low = { 0 };
@@ -3619,6 +3839,7 @@ bool CNvmeQueue::AllocQueueBuffer()
 
     return true;
 }
+// 概要: 内部変数やデバイス状態を初期化します。
 bool CNvmeQueue::InitQueueBuffer()
 {
     this->SubQ_Size = this->Depth * sizeof(NVME_COMMAND);
@@ -3644,6 +3865,7 @@ ERROR:
     this->CplQ_VA = NULL;
     return false;
 }
+// 概要: キュー処理で確保したメモリを解放します。
 void CNvmeQueue::DeallocQueueBuffer()
 {
     if(UseExtBuffer)
@@ -3661,16 +3883,20 @@ void CNvmeQueue::DeallocQueueBuffer()
 #pragma endregion
 
 #pragma region ======== class CCmdHistory ========
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CCmdHistory::CCmdHistory()
 {
 }
+// 概要: オブジェクトの初期化と内部状態の準備を行います。
 CCmdHistory::CCmdHistory(class CNvmeQueue* parent, PVOID devext, USHORT depth, ULONG numa_node)
         : CCmdHistory()
 {   Setup(parent, devext, depth, numa_node);    }
+// 概要: オブジェクトの終了処理と保持リソースの解放を行います。
 CCmdHistory::~CCmdHistory()
 {
     Teardown();
 }
+// 概要: デバイスまたは内部設定を更新します。
 NTSTATUS CCmdHistory::Setup(class CNvmeQueue* parent, PVOID devext, USHORT depth, ULONG numa_node)
 {
     this->Parent = parent;
@@ -3688,6 +3914,7 @@ NTSTATUS CCmdHistory::Setup(class CNvmeQueue* parent, PVOID devext, USHORT depth
     this->History = (PSPCNVME_SRBEXT *)this->Buffer;
     return STATUS_SUCCESS;
 }
+// 概要: デバイスまたはキューの終了処理を行います。
 void CCmdHistory::Teardown()
 {
 
@@ -3696,6 +3923,7 @@ void CCmdHistory::Teardown()
 
     this->Buffer = NULL;
 }
+// 概要: 内部状態や未完了要求を初期状態へ戻します。
 void CCmdHistory::Reset()
 {
     if(NULL == this->History)
@@ -3710,6 +3938,7 @@ void CCmdHistory::Reset()
         }
     }
 }
+// 概要: コマンド履歴へ SRB 拡張を登録します。
 NTSTATUS CCmdHistory::Push(ULONG index, PSPCNVME_SRBEXT srbext)
 {
     if(index >= Depth)
@@ -3723,6 +3952,7 @@ NTSTATUS CCmdHistory::Push(ULONG index, PSPCNVME_SRBEXT srbext)
 
     return STATUS_SUCCESS;
 }
+// 概要: コマンド履歴から SRB 拡張を取り出します。
 NTSTATUS CCmdHistory::Pop(ULONG index, PSPCNVME_SRBEXT& srbext)
 {
     if (index >= Depth)
@@ -3743,11 +3973,13 @@ NTSTATUS CCmdHistory::Pop(ULONG index, PSPCNVME_SRBEXT& srbext)
 
 // HwStartIo から呼ばれる要求本体のディスパッチャです。
 // BuildIo で検証済みの SRB を SCSI CDB、IOCTL、既定エラー処理へ振り分けます。
+// 概要: StartIo_DefaultHandler の処理を行います。
 UCHAR StartIo_DefaultHandler(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 }
+// 概要: StartIo_ScsiHandler の処理を行います。
 UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
 {
     UCHAR opcode = srbext->Cdb()->CDB6GENERIC.OperationCode;
@@ -3959,6 +4191,7 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
 
     return srb_status;
 }
+// 概要: StartIo_IoctlHandler の処理を行います。
 UCHAR StartIo_IoctlHandler(PSPCNVME_SRBEXT srbext)
 {
 
@@ -3983,6 +4216,7 @@ UCHAR StartIo_IoctlHandler(PSPCNVME_SRBEXT srbext)
 // HwBuildIo から呼ばれる軽量ハンドラ群です。
 // DISPATCH_LEVEL でも呼ばれ得るため、時間のかかる処理は避け、PnP/電源イベントや
 // StartIo 前の検証を中心に行います。
+// 概要: アダプタ PnP 要求に対する応答を作成します。
 static UCHAR AdapterPnp_QueryCapHandler(PSPCNVME_SRBEXT srbext)
 {
     PSTOR_DEVICE_CAPABILITIES_EX cap = (PSTOR_DEVICE_CAPABILITIES_EX)srbext->DataBuf();
@@ -4003,18 +4237,21 @@ static UCHAR AdapterPnp_QueryCapHandler(PSPCNVME_SRBEXT srbext)
     return SRB_STATUS_SUCCESS;
 }
 
+// 概要: 要求処理に必要なデータを構築します。
 BOOLEAN BuildIo_DefaultHandler(PSPCNVME_SRBEXT srbext)
 {
 	srbext->CompleteSrb(SRB_STATUS_INVALID_REQUEST);
     return FALSE;
 }
 
+// 概要: 要求処理に必要なデータを構築します。
 BOOLEAN BuildIo_IoctlHandler(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return TRUE;
 }
 
+// 概要: 要求処理に必要なデータを構築します。
 BOOLEAN BuildIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
 {
     DebugScsiOpCode(srbext->Cdb()->CDB6GENERIC.OperationCode);
@@ -4030,12 +4267,14 @@ BOOLEAN BuildIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     return TRUE;
 }
 
+// 概要: 要求処理に必要なデータを構築します。
 BOOLEAN BuildIo_SrbPowerHandler(PSPCNVME_SRBEXT srbext)
 {
 	srbext->CompleteSrb(SRB_STATUS_INVALID_REQUEST);
     return FALSE;
 }
 
+// 概要: 要求処理に必要なデータを構築します。
 BOOLEAN BuildIo_SrbPnpHandler(PSPCNVME_SRBEXT srbext)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
