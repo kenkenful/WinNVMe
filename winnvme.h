@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string.h>
 #include <ntifs.h>
@@ -13,13 +13,20 @@ EXTERN_C_START
 #include <srbhelper.h>
 EXTERN_C_END
 
+// Storport ミニポート NVMe ドライバ全体で共有する宣言を集約したヘッダです。
+// プールタグ、定数、SRB 拡張、NVMe Queue、NVMe Device、SCSI/IOCTL ハンドラの
+// プロトタイプがここにまとまっています。
+
+// デバッグ用の目印値です。メモリ破壊や意図しない delete を検出する用途で使います。
 #define MARKER_TAG          0x23939889
 #define BSOD_DELETE_ERROR   0x28825252
 
+// DbgPrintEx で使う共通設定です。DEBUG_PREFIX はログの発生元識別子になります。
 #define MSG_BUFFER_SIZE     128
 #define DEBUG_PREFIX        "SPC ==>"
 #define DBG_FILTER          0x00000888
 
+// カーネルプールに確保した領域を追跡しやすくするためのタグです。
 #define CALLINOUT_TAG       (ULONG)'TUOC'
 #define DBGMSG_LEVEL        0x00001000
 #define KPRINTF(x)          DbgPrintEx(DPFLTR_IHVDRIVER_ID, DBGMSG_LEVEL, x)
@@ -38,6 +45,7 @@ private:
     static const int BufSize = 64;
     char* Name = NULL;
 public:
+    // スコープに置くだけで関数入口/出口ログを出す RAII トレーサです。
     CDebugCallInOut(char* name);
     CDebugCallInOut(const char* name);
     ~CDebugCallInOut();
@@ -46,6 +54,8 @@ public:
 class CSpinLock
 {
 public:
+    // KeAcquireSpinLock/KeReleaseSpinLock を RAII で扱います。
+    // 取得時 IRQL は OldIrql に保存され、解放時に復元されます。
     CSpinLock(KSPIN_LOCK* lock, bool acquire = true);
     ~CSpinLock();
 
@@ -60,6 +70,8 @@ protected:
 class CStorSpinLock
 {
 public:
+    // Storport のロック API 用 RAII ラッパです。
+    // Queue や DPC など Storport 管理下の共有データを守るときに使います。
     CStorSpinLock(PVOID devext, STOR_SPINLOCK reason, PVOID ctx = NULL);
     ~CStorSpinLock();
     inline void Acquire(STOR_SPINLOCK reason, PVOID ctx = NULL)
@@ -78,6 +90,8 @@ protected:
 
 namespace SPC
 {
+    // CAutoPtr は std::unique_ptr 相当の単純な所有権管理クラスです。
+    // カーネルドライバで STL を避けつつ、途中 return/goto 時のリークを減らします。
     template <typename _Ty, POOL_TYPE _PoolType, ULONG _PoolTag>
     class SpcCppDeleter
     {
@@ -176,46 +190,8 @@ namespace SPC
 
 using SPC::CAutoPtr;
 
-// ===== Begin PoolTags.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// プールタグ定義です。Windows カーネルのメモリ追跡ではタグ単位で使用量を確認できるため、
+// SRB、PRP list、ログページ、レジスタバッファなど用途別に分けています。
 
 
 #define TAG_GENBUF      (ULONG)'FUBG'
@@ -226,66 +202,21 @@ using SPC::CAutoPtr;
 #define TAG_LOG_PAGE    (ULONG)'PGOL'
 #define TAG_REG_BUFFER  (ULONG)'BGER'
 #define TAG_ISR_POLL_CPL (ULONG)'LPCC'
-// ===== End PoolTags.h =====
 
-// ===== Begin Constants.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// ドライバ全体で使う固定値です。NVMe/SCSI/Storport の境界で使う ID、キュー数、
+// タイムアウト、レジストリ名などをここにまとめています。
 
 
 #define NVME_INVALID_ID     ((ULONG)-1)
-#define NVME_INVALID_CID    ((USHORT)-1)        //should align to NVME CID size
+#define NVME_INVALID_CID    ((USHORT)-1)
 #define NVME_INVALID_QID    ((USHORT)-1)
 
 #define MAX_LOGIC_UNIT      1
 #define MAX_IO_QUEUE_COUNT  64
 
-//#define MAX_TX_PAGES        32
-//#define MAX_TX_SIZE         (PAGE_SIZE * MAX_TX_PAGES)
-//#define MAX_CONCURRENT_IO   4096
 
 #define ACCESS_RANGE_COUNT  8
 
-//const char* SpcVendorID = "SPC     ";           //vendor name
-//const char* SpcProductID = "SomkingPC NVMe  ";  //model name
-//const char* SpcProductRev = "0100";
 
 #pragma region  ======== SCSI and SRB ========
 #define SRB_FUNCTION_SPC_INTERNAL   0xFF
@@ -297,7 +228,7 @@ using SPC::CAutoPtr;
 
 #pragma region  ======== NVME ========
 #define DEFAULT_INT_COALESCE_COUNT  10
-#define DEFAULT_INT_COALESCE_TIME   2    //in 100us unit
+#define DEFAULT_INT_COALESCE_TIME   2
 #pragma endregion
 
 #pragma region  ======== REGISTRY ========
@@ -309,48 +240,9 @@ using SPC::CAutoPtr;
 
 
 #pragma endregion
-// ===== End Constants.h =====
 
-// ===== Begin Inline_Utils.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// バイトオーダ変換、ビット操作、SRB バッファコピーなどの軽量 inline 補助関数群です。
+// SCSI CDB はビッグエンディアン表現を含むため、Windows/NVMe 側の値へ変換します。
 
 
 FORCEINLINE size_t DivRoundUp(size_t value, size_t align_size)
@@ -373,56 +265,17 @@ FORCEINLINE bool IsAddrEqual(PHYSICAL_ADDRESS& a, PHYSICAL_ADDRESS& b)
 {
     return IsAddrEqual(&a, &b);
 }
-// ===== End Inline_Utils.h =====
 
-// ===== Begin NvmeConstants.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// NVMe 仕様に基づく固定値です。Queue Entry サイズ、Feature ID、Vendor/Product 文字列など、
+// NVMe コマンド作成や INQUIRY 応答で参照されます。
 
 
 namespace NVME_CONST{
-    static const char* VENDOR_ID = "SPC     ";           //vendor name
-    static const char* PRODUCT_ID = "SomkingPC NVMe  ";  //model name
+    static const char* VENDOR_ID = "SPC     ";
+    static const char* PRODUCT_ID = "SomkingPC NVMe  ";
     static const char* PRODUCT_REV = "0100";
 
-    static const ULONG TX_PAGES = 512; //PRP1 + PRP2 MAX PAGES
+    static const ULONG TX_PAGES = 512;
     static const ULONG TX_SIZE = PAGE_SIZE * TX_PAGES;
     static const UCHAR SUPPORT_NAMESPACES = 4;
     static const ULONG UNSPECIFIC_NSID = 0;
@@ -430,81 +283,39 @@ namespace NVME_CONST{
     static const UCHAR MAX_TARGETS = 1;
     static const UCHAR MAX_LU = 1;
     static const ULONG MAX_IO_PER_LU = 512;
-    static const UCHAR IOSQES = 6; //sizeof(NVME_COMMAND)==64 == 2^6, so IOSQES== 6.
-    static const UCHAR IOCQES = 4; //sizeof(NVME_COMPLETION_ENTRY)==16 == 2^4, so IOCQES== 4.
-    static const UCHAR ADMIN_QUEUE_DEPTH = 64;  //how many entries does the admin queue have?
+    static const UCHAR IOSQES = 6;
+    static const UCHAR IOCQES = 4;
+    static const UCHAR ADMIN_QUEUE_DEPTH = 64;
     
-    static const USHORT CPL_INIT_PHASETAG = 1;  //CompletionQueue phase tag init value;
+    static const USHORT CPL_INIT_PHASETAG = 1;
     static const UCHAR IO_QUEUE_COUNT = 16;
     static const USHORT IO_QUEUE_DEPTH = MAX_IO_PER_LU / 2;
     static const ULONG DEFAULT_MAX_TXSIZE = 131072;
-    static const USHORT MAX_CID = MAXUSHORT-1;  //0xFFFF is invalid 
-    static const ULONG MAX_NS_COUNT = 1024;     //Max NameSpace count. defined in NVMe spec.
-    //static const ULONG MAX_CONCURRENT_IO = 1024;
-    //static const USHORT SQ_CMD_SIZE = sizeof(NVME_COMMAND);
-    //static const USHORT SQ_CMD_SIZE_SHIFT = 6; //sizeof(NVME_COMMAND) is 64 bytes == 2^6
+    static const USHORT MAX_CID = MAXUSHORT-1;
+    static const ULONG MAX_NS_COUNT = 1024;
     static const ULONG CPL_ALL_ENTRY = MAXULONG;
     static const ULONG INIT_DBL_VALUE = 0;
     static const ULONG INVALID_DBL_VALUE = (ULONG)MAXUSHORT;
-    static const ULONG ISR_HANDLED_CPL = 8;     //how many cpl entries will be handled in each ISR call?
+    static const ULONG ISR_HANDLED_CPL = 8;
     static const ULONG MAX_INT_COUNT = 64;
     static const ULONG SAFE_SUBMIT_THRESHOLD = 8;
-    static const ULONG STALL_TIME_US = 100;  //in micro-seconds
-    static const ULONG SLEEP_TIME_US = STALL_TIME_US*5;    //in micro-seconds
+    static const ULONG STALL_TIME_US = 100;
+    static const ULONG SLEEP_TIME_US = STALL_TIME_US*5;
 
     #pragma region ======== SetFeature default values ========
-    static const UCHAR INTCOAL_TIME = 2;   //Interrupt Coalescing time threshold in 100us unit.
-    static const UCHAR INTCOAL_THRESHOLD = 8;   //Interrupt Coalescing trigger threshold.
+    static const UCHAR INTCOAL_TIME = 2;
+    static const UCHAR INTCOAL_THRESHOLD = 8;
 
-    static const UCHAR AB_BURST = 7;        //Arbitration Burst. 111b(0n7) is Unlimit.
-    static const UCHAR AB_HPW = 32 - 1;     //High Priority Weight. it is 0-based so need substract 1.
-    static const UCHAR AB_MPW = 16 - 1;     //Medium Priority Weight. it is 0-based so need substract 1.
-    static const UCHAR AB_LPW = 8 - 1;      //Low Priority Weight. it is 0-based so need substract 1.
+    static const UCHAR AB_BURST = 7;
+    static const UCHAR AB_HPW = 32 - 1;
+    static const UCHAR AB_MPW = 16 - 1;
+    static const UCHAR AB_LPW = 8 - 1;
 
     #pragma endregion
 };
-// ===== End NvmeConstants.h =====
 
-// ===== Begin NvmeEnums.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// ドライバ内部で使う列挙型です。Queue 種別、コマンド種別、Identify CNS、
+// デバイス状態など、数値だけでは意図が読み取りにくい状態を名前付きで扱います。
 
 
 typedef enum class _QUEUE_TYPE
@@ -520,9 +331,7 @@ typedef enum class _NVME_CMD_TYPE : UINT32
     UNKNOWN = 0,
     ADM_CMD = 1,
     IO_CMD = 2,
-//    SRB_CMD = 0x00001000,           //this command use SRB , no wait event. using regular SRB handling
-//    WAIT_CMD = 0x00002000,          //this command is internal cmd and waiting for event signal
-    SELF_ISSUED = 0x80000000,           //this command issued by SpcNvme.sys myself.
+    SELF_ISSUED = 0x80000000,
 }NVME_CMD_TYPE;
 
 typedef enum class _CMD_CTX_TYPE
@@ -540,76 +349,26 @@ typedef enum class _IDENTIFY_CNS : UCHAR
 
 }IDENTIFY_CNS;
 
-//typedef enum _USE_STATE
-//{
-//    FREE = 0,
-//    USED = 1,
-//}USE_STATE;
 
 typedef enum _NVME_STATE {
     STOP = 0,
     RUNNING = 1,
     SETUP = 2,
-    INIT = 3,       //In InitStage1 and InitStage2
+    INIT = 3,
     TEARDOWN = 4,
     RESETCTRL = 5,
     RESETBUS = 6,
-    SHUTDOWN = 10,   //CC.SHN==1
+    SHUTDOWN = 10,
 }NVME_STATE;
 
-// ===== End NvmeEnums.h =====
 
-// ===== Begin PCIe_Msix.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// PCIe MSI-X テーブルのレイアウト定義です。
+// メッセージアドレス、メッセージデータ、ベクタ制御を読み書きするために使います。
 
 
 #pragma push(1)
-#pragma warning(disable:4201)   // nameless struct/union
+#pragma warning(disable:4201)
 
-//MSIX Table data example: (only allocated 3 MSIX interrupt)
-//0: kd > dd 0xffffe501eaaea000
-//ffffe501`eaaea000  fee0400c 00000000 000049b3 00000000
-//ffffe501`eaaea010  fee0800c 00000000 000049b3 00000000
-//ffffe501`eaaea020  fee0100c 00000000 00004993 00000000
-//ffffe501`eaaea030  fee0400c 00000000 000049b3 00000000
 typedef union _MSIX_MSG_ADDR
 {
     struct {
@@ -618,7 +377,7 @@ typedef union _MSIX_MSG_ADDR
         ULONG64 RedirHint : 1;
         ULONG64 Reserved : 8;
         ULONG64 DestinationID : 8;
-        ULONG64 BaseAddr : 12;        //LocalAPIC register phypage, which set in CPU MSR(0x1B)
+        ULONG64 BaseAddr : 12;
         ULONG64 Reserved2 : 32;
     };
     inline ULONG64 GetApicBaseAddr() { return (BaseAddr << 20); }
@@ -664,48 +423,10 @@ typedef struct
     }DUMMYSTRUCTNAME;
 }MsixVector, * PMsixVector;
 #pragma pop()
-// ===== End PCIe_Msix.h =====
 
-// ===== Begin SrbExt.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// SRB ごとの作業状態を保持する拡張領域です。
+// Storport の SRB、NVMe コマンド、PRP list、一時バッファ、完了コールバックを束ね、
+// BuildIo から Queue 完了まで同じコンテキストとして扱います。
 
 
 class CNvmeDevice;
@@ -719,18 +440,21 @@ typedef struct _SPCNVME_SRBEXT
     static _SPCNVME_SRBEXT *GetSrbExt(PSTORAGE_REQUEST_BLOCK srb);
 	static _SPCNVME_SRBEXT* InitSrbExt(PVOID devext, PSTORAGE_REQUEST_BLOCK srb);
 
+    // Storport が渡した元の SRB と、この要求を処理する NVMe デバイスです。
     CNvmeDevice *DevExt;
     PSTORAGE_REQUEST_BLOCK Srb;
-    UCHAR SrbStatus;        //returned SrbStatus for SyncCall of Admin cmd (e.g. IndeitfyController) 
+    UCHAR SrbStatus;
     BOOLEAN InitOK;
+
+    // 要求ごとに構築される NVMe コマンド、完了エントリ、PRP list 情報です。
     BOOLEAN FreePrp2List;
     NVME_COMMAND NvmeCmd;
     NVME_COMPLETION_ENTRY NvmeCpl;
     PVOID Prp2VA;
     PHYSICAL_ADDRESS Prp2PA;
+    // 非同期コマンド完了時に呼ばれる任意の後処理です。
     PSPC_SRBEXT_COMPLETION CompletionCB;
-    //ExtBuf is used to retrieve data by cmd. e.g. LogPage Buffer in GetLogPage().
-    //It should be freed in CompletionCB.
+
     PVOID ExtBuf;      
     
     #pragma region ======== for Debugging ========
@@ -745,13 +469,13 @@ typedef struct _SPCNVME_SRBEXT
     void CleanUp();
     void CompleteSrb(UCHAR status);
     void CompleteSrb(NVME_COMMAND_STATUS& nvme_status);
-    ULONG FuncCode();         //SRB Function Code
+    ULONG FuncCode();
     ULONG ScsiQTag();
     PCDB Cdb();
     UCHAR CdbLen();
-    UCHAR PathID();           //SCSI Path (bus) ID
-    UCHAR TargetID();         //SCSI Device ID
-    UCHAR Lun();              //SCSI Logical UNit ID
+    UCHAR PathID();
+    UCHAR TargetID();
+    UCHAR Lun();
     PVOID DataBuf();
     ULONG DataBufLen();
     void SetTransferLength(ULONG length);
@@ -765,60 +489,23 @@ UCHAR NvmeCmdSpecificToSrbStatus(NVME_COMMAND_STATUS &status);
 UCHAR NvmeMediaErrorToSrbStatus(NVME_COMMAND_STATUS &status);
 
 void SetScsiSenseBySrbStatus(PSTORAGE_REQUEST_BLOCK srb, UCHAR &status);
-// ===== End SrbExt.h =====
 
-// ===== Begin NvmeQueue.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// NVMe の Submission Queue と Completion Queue を表すクラス群です。
+// CCmdHistory は Command ID と SRB 拡張の対応を保持し、CNvmeQueue は
+// キューメモリ、Doorbell、完了処理を管理します。
 
 
 typedef struct _QUEUE_PAIR_CONFIG {
+    // Queue 作成時に必要なデバイス拡張、Queue ID、深さ、Doorbell、割り込み情報をまとめます。
     PVOID DevExt = NULL;
-    USHORT QID = 0;         //QueueID is zero-based. ID==0 is assigned to AdminQueue constantly
+    USHORT QID = 0;
     USHORT Depth = 0;
     USHORT HistoryDepth = 0;
     ULONG NumaNode = MM_ANY_NODE_OK;
     QUEUE_TYPE Type = QUEUE_TYPE::IO_QUEUE;
     PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL SubDbl = NULL;
     PNVME_COMPLETION_QUEUE_HEAD_DOORBELL CplDbl = NULL;
-    PVOID PreAllocBuffer = NULL;            //SubQ and CplQ should be continuous memory together
+    PVOID PreAllocBuffer = NULL;
     size_t PreAllocBufSize = 0; 
 }QUEUE_PAIR_CONFIG, * PQUEUE_PAIR_CONFIG;
 
@@ -831,6 +518,7 @@ class CCmdHistory
 {
     friend class CNvmeQueue;
 public:
+    // Completion Entry の Command Identifier から元の要求を引き戻すための履歴表です。
     const ULONG BufferTag = (ULONG)'HBRS';
 
     CCmdHistory();
@@ -847,18 +535,19 @@ private:
     PVOID DevExt = NULL;
     PVOID Buffer = NULL;
     size_t BufferSize = 0;
-    PSPCNVME_SRBEXT *History = NULL; //Cast of RawBuffer
-    ULONG Depth = 0;                   //how many items in this->History ?
+    PSPCNVME_SRBEXT *History = NULL;
+    ULONG Depth = 0;
     USHORT QueueID = NVME_INVALID_QID;
     ULONG NumaNode = MM_ANY_NODE_OK;
 
-    //KSPIN_LOCK CmdLock;
     class CNvmeQueue* Parent = NULL;
 };
 
 class CNvmeQueue
 {
 public:
+    // 1 組の Submission Queue / Completion Queue を管理します。
+    // Admin Queue と I/O Queue の両方で使われます。
     const static ULONG BufferTag = (ULONG)'QMVN';
     const static MEMORY_CACHING_TYPE CacheType = MEMORY_CACHING_TYPE::MmNonCached;
     static VOID QueueCplDpcRoutine(
@@ -888,25 +577,22 @@ public:
 
     STOR_DPC QueueCplDpc;
     PVOID DevExt = NULL;
-    USHORT QueueID = NVME_INVALID_QID;  //1-based ID, 0 is reserved for AdminQ
-    USHORT Depth = 0;       //how many entries in both SubQ and CplQ?
+    USHORT QueueID = NVME_INVALID_QID;
+    USHORT Depth = 0;
     ULONG NumaNode = MM_ANY_NODE_OK;
     bool IsReady = false;
-    bool UseExtBuffer = false; //Is this Queue use "external allocated buffer" ?
-    //In CNvmeQueuePair, it allocates SubQ and CplQ in one large continuous block.
-    //QueueBuffer is pointer of this large block.
-    //Then divide into 2 blocks for SubQ and CplQ.
+    bool UseExtBuffer = false;
     PVOID Buffer = NULL;
     PHYSICAL_ADDRESS BufferPA = {0};
-    size_t BufferSize = 0;      //total size of entire queue buffer, BufferSize >= (SubQ_Size + CplQ_Size)
+    size_t BufferSize = 0;
     volatile LONG InflightCmds = 0;
-    PNVME_COMMAND SubQ_VA = NULL;       //Virtual address of SubQ Buffer.
+    PNVME_COMMAND SubQ_VA = NULL;
     PHYSICAL_ADDRESS SubQ_PA = { 0 }; 
-    size_t SubQ_Size = 0;       //total length of SubQ Buffer.
+    size_t SubQ_Size = 0;
 
-    PNVME_COMPLETION_ENTRY CplQ_VA = NULL;       //Virtual address of CplQ Buffer.
+    PNVME_COMPLETION_ENTRY CplQ_VA = NULL;
     PHYSICAL_ADDRESS CplQ_PA = { 0 }; 
-    size_t CplQ_Size = 0;       //total length of CplQ Buffer.
+    size_t CplQ_Size = 0;
 
     QUEUE_TYPE Type = QUEUE_TYPE::IO_QUEUE;
     USHORT HistoryDepth = 0;
@@ -920,59 +606,20 @@ public:
     PNVME_COMPLETION_QUEUE_HEAD_DOORBELL CplDbl = NULL;
 
     KSPIN_LOCK SubLock;
-    //bool IsDoingCpl;
 
     bool IsSafeForSubmit();
     ULONG ReadSubTail();
     void WriteSubTail(ULONG value);
     ULONG ReadCplHead();
     void WriteCplHead(ULONG value);
-    bool InitQueueBuffer();    //init contents of this queue
-    bool AllocQueueBuffer();    //allocate memory of this queue
+    bool InitQueueBuffer();
+    bool AllocQueueBuffer();
     void DeallocQueueBuffer();
 };
-// ===== End NvmeQueue.h =====
 
-// ===== Begin NvmeDevice.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// NVMe コントローラ単位の状態と操作をまとめる中心クラスです。
+// PCI リソース、NVMe レジスタ、Admin/IO Queue、Identify 情報、レジストリ設定、
+// PnP/電源状態を保持し、ミニポートコールバックから呼び出されます。
 
 
 typedef struct _DOORBELL_PAIR{
@@ -980,17 +627,14 @@ typedef struct _DOORBELL_PAIR{
     NVME_COMPLETION_QUEUE_HEAD_DOORBELL CplHead;
 }DOORBELL_PAIR, *PDOORBELL_PAIR;
 
-//HW_MESSAGE_SIGNALED_INTERRUPT_ROUTINE NvmeMsixISR;
 
-//Using this class represents the DeviceExtension.
-//Because memory allocation in kernel is still C style,
-//the constructor and destructor are useless. They won't be called.
-//So using Setup() and Teardown() to replace them.
 class CNvmeDevice {
 public:
-    static const ULONG BUGCHECK_BASE = 0x23939889;          //pizzahut....  XD
-    static const ULONG BUGCHECK_ADAPTER = BUGCHECK_BASE + 1;            //adapter has some problem. e.g. CSTS.CFS==1
-    static const ULONG BUGCHECK_INVALID_STATE = BUGCHECK_BASE + 2;      //if action in invalid controller state, fire this bugcheck
+    // Storport の DeviceExtension として配置されるため、C++ コンストラクタではなく
+    // Setup/Teardown でライフサイクルを管理します。
+    static const ULONG BUGCHECK_BASE = 0x23939889;
+    static const ULONG BUGCHECK_ADAPTER = BUGCHECK_BASE + 1;
+    static const ULONG BUGCHECK_INVALID_STATE = BUGCHECK_BASE + 2;
     static const ULONG BUGCHECK_NOT_IMPLEMENTED = BUGCHECK_BASE + 10;
     static const ULONG DEV_POOL_TAG = (ULONG) 'veDN';
     static BOOLEAN NvmeMsixISR(IN PVOID devext, IN ULONG msgid);
@@ -1007,37 +651,38 @@ public:
     NTSTATUS Setup(PPORT_CONFIGURATION_INFORMATION pci);
     void Teardown();
 
+    // NVMe Controller Configuration/Status レジスタを操作する基本制御です。
     NTSTATUS EnableController();
     NTSTATUS DisableController();
-    NTSTATUS ShutdownController();  //set CC.SHN and wait CSTS.SHST==2
+    NTSTATUS ShutdownController();
 
     NTSTATUS InitController();
-    NTSTATUS InitNvmeStage1();      //InitNvmeStage1() should be called AFTER HwFindAdapte because it need interrupt.
-    NTSTATUS InitNvmeStage2();      //InitNvmeStage1() should be called AFTER HwFindAdapte because it need interrupt.
-    NTSTATUS RestartController();   //for AdapterControl's ScsiRestartAdaptor
+    NTSTATUS InitNvmeStage1();
+    NTSTATUS InitNvmeStage2();
+    NTSTATUS RestartController();
 
     NTSTATUS RegisterIoQueues(PSPCNVME_SRBEXT srbext);
     NTSTATUS UnregisterIoQueues(PSPCNVME_SRBEXT srbext);
 
-    //NTSTATUS InitIdentifyCtrl();
     NTSTATUS IdentifyAllNamespaces();
     NTSTATUS IdentifyFirstNamespace();
-    NTSTATUS CreateIoQueues(bool force = false);    //if(force) => delete exist queue objects and recreate again.
+    NTSTATUS CreateIoQueues(bool force = false);
 
+    // Identify と Feature 設定などの Admin Command 群です。
     NTSTATUS IdentifyController(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA ident, bool poll = false);
     NTSTATUS IdentifyNamespace(PSPCNVME_SRBEXT srbext, ULONG nsid, PNVME_IDENTIFY_NAMESPACE_DATA data);
-    //nsid_list : variable to store query result. It's size should be PAGE_SIZE.(NVMe max support 1024 NameSpace)
     NTSTATUS IdentifyActiveNamespaceIdList(PSPCNVME_SRBEXT srbext, PVOID nsid_list, ULONG &ret_count);
 
-    NTSTATUS SetNumberOfIoQueue(USHORT count);  //tell NVMe device: I want xx i/o queues. then device reply: I can allow you use xxxx queues.
+    NTSTATUS SetNumberOfIoQueue(USHORT count);
     NTSTATUS SetInterruptCoalescing();
     NTSTATUS SetAsyncEvent();
     NTSTATUS SetArbitration();
     NTSTATUS SetSyncHostTime();
     NTSTATUS SetPowerManagement();
     NTSTATUS GetLbaFormat(ULONG nsid, NVME_LBA_FORMAT &format);
-    NTSTATUS GetNamespaceBlockSize(ULONG nsid, ULONG& size);    //get LBA block size in Bytes
-    NTSTATUS GetNamespaceTotalBlocks(ULONG nsid, ULONG64& blocks);    //get LBA total block count of specified namespace.
+    NTSTATUS GetNamespaceBlockSize(ULONG nsid, ULONG& size);
+    NTSTATUS GetNamespaceTotalBlocks(ULONG nsid, ULONG64& blocks);
+    // I/O パスで使うコマンド投入入口です。Admin Queue と I/O Queue を明確に分けます。
     NTSTATUS SubmitAdmCmd(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd);
     NTSTATUS SubmitIoCmd(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd);
     void ResetOutstandingCmds();
@@ -1060,20 +705,20 @@ public:
     ULONG AllocatedIoQ = 0;
     ULONG DesiredIoQ = 0;
 
-    ULONG DeviceTimeout;        //should be updated by CAP, unit in micro-seconds
+    ULONG DeviceTimeout;
     ULONG StallDelay;
 
-    ACCESS_RANGE AccessRanges[ACCESS_RANGE_COUNT];         //AccessRange from miniport HwFindAdapter.
+    ACCESS_RANGE AccessRanges[ACCESS_RANGE_COUNT];
     ULONG AccessRangeCount;
     ULONG Bar0Size;
     UCHAR MaxNamespaces;
     USHORT IoDepth;
     USHORT AdmDepth;
     ULONG TotalNumaNodes;
-    ULONG NamespaceCount;       //how many namespace active in current device?
+    ULONG NamespaceCount;
     
-    UCHAR CoalescingThreshold;  //how many interrupt should be coalesced into one interrupt?
-    UCHAR CoalescingTime;       //how long(time) should interrupts be coalesced?
+    UCHAR CoalescingThreshold;
+    UCHAR CoalescingTime;
 
     USHORT  VendorID;
     USHORT  DeviceID;
@@ -1084,7 +729,6 @@ public:
     NVME_IDENTIFY_CONTROLLER_DATA       CtrlIdent;
     NVME_IDENTIFY_NAMESPACE_DATA        NsData[NVME_CONST::SUPPORT_NAMESPACES];
     
-    //these 2 DPC and WorkItem are used for HwAdapterControl::ScsiRestartAdapter event.
     PVOID                               RestartWorker;
     STOR_DPC                            RestartDpc;
     GROUP_AFFINITY                      MsgGroupAffinity[NVME_CONST::MAX_INT_COUNT];
@@ -1096,8 +740,6 @@ private:
     CNvmeQueue* AdmQueue;
     CNvmeQueue* IoQueue[MAX_IO_QUEUE_COUNT];
 
-    //Following are huge data.
-    //for more convenient windbg debugging, I put them on tail of class data.
     PCI_COMMON_CONFIG                   PciCfg;
 
     void InitVars();
@@ -1108,12 +750,11 @@ private:
     NTSTATUS UnregisterAdmQ();
     NTSTATUS DeleteAdmQ();
 
-    NTSTATUS CreateIoQ();   //create all IO queue
-    NTSTATUS DeleteIoQ();   //delete all IO queue
+    NTSTATUS CreateIoQ();
+    NTSTATUS DeleteIoQ();
 
-    void ReadCtrlCap();      //load capability and informations AFTER register address mapped.
+    void ReadCtrlCap();
     bool MapCtrlRegisters();
-    //bool GetMsixTable();
     bool GetPciBusData(INTERFACE_TYPE type, ULONG bus, ULONG slot);
 
     bool WaitForCtrlerState(ULONG time_us, BOOLEAN csts_rdy);
@@ -1142,51 +783,11 @@ private:
     BOOLEAN IsControllerEnabled(bool barrier = true);
     BOOLEAN IsControllerReady(bool barrier = true);
     void UpdateMaxTxSize();
-    //void DoQueueCompletion(CNvmeQueue* queue);
 };
 
-// ===== End NvmeDevice.h =====
 
-// ===== Begin MiniportFunctions.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// Storport に登録するミニポートコールバックの宣言です。
+// DriverEntry の HW_INITIALIZATION_DATA に設定され、OS のストレージスタックから呼ばれます。
 
 
 HW_INITIALIZE HwInitialize;
@@ -1207,93 +808,15 @@ HW_CLEANUP_TRACING HwCleanupTracing;
 SCSI_ADAPTER_CONTROL_STATUS Handle_QuerySupportedControlTypes(
     PSCSI_SUPPORTED_CONTROL_TYPE_LIST list);
 SCSI_ADAPTER_CONTROL_STATUS Handle_RestartAdapter(CNvmeDevice* devext);
-// ===== End MiniportFunctions.h =====
 
-// ===== Begin NvmePrpBuilder.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// NVMe PRP 作成処理の宣言です。SCSI/IOCTL のデータバッファを
+// NVMe コマンドが参照できる物理ページリストへ変換します。
 
 
 bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t buf_size);
-// ===== End NvmePrpBuilder.h =====
 
-// ===== Begin NvmeCmdBuilder.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// NVMe コマンドビルダの宣言です。Read/Write、Identify、Queue 作成/削除、
+// Feature 設定、Security Send/Receive などの Command Dword をここで統一します。
 
 
 void BuiildCmd_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG blocks, bool is_write);
@@ -1317,105 +840,26 @@ void BuildCmd_GetFirmwareSlotsInfoV1(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT
 void BuildCmd_AdminSecuritySend(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb);
 void BuildCmd_AdminSecurityRecv(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb);
 
-// ===== End NvmeCmdBuilder.h =====
 
-// ===== Begin BuildIo_Handlers.h =====
-
+// HwBuildIo で使う軽量ディスパッチャです。PnP/電源など StartIo に回さず
+// その場で処理したい要求と、StartIo 前の検証を担当します。
 BOOLEAN BuildIo_DefaultHandler(PSPCNVME_SRBEXT srbext);
 BOOLEAN BuildIo_IoctlHandler(PSPCNVME_SRBEXT srbext);
 BOOLEAN BuildIo_ScsiHandler(PSPCNVME_SRBEXT srbext);
 BOOLEAN BuildIo_SrbPowerHandler(PSPCNVME_SRBEXT srbext);
 BOOLEAN BuildIo_SrbPnpHandler(PSPCNVME_SRBEXT srbext);
 
-// ===== End BuildIo_Handlers.h =====
 
-// ===== Begin StartIo_Handler.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// HwStartIo で使う実処理ディスパッチャです。SCSI CDB と IOCTL を解釈し、
+// 必要に応じて NVMe コマンドをキューへ投入します。
 
 
 UCHAR StartIo_DefaultHandler(PSPCNVME_SRBEXT srbext);
 UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext);
 UCHAR StartIo_IoctlHandler(PSPCNVME_SRBEXT srbext);
-// ===== End StartIo_Handler.h =====
 
-// ===== Begin Scsi_Utils.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// SCSI コマンド処理の共通宣言です。各 CDB 長ごとのハンドラと、
+// 読み書き共通の NVMe I/O 変換入口をまとめています。
 
 
 UCHAR Scsi_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG len, bool is_write);
@@ -1448,48 +892,9 @@ UCHAR Scsi_Read16(PSPCNVME_SRBEXT srbext);
 UCHAR Scsi_Write16(PSPCNVME_SRBEXT srbext);
 UCHAR Scsi_Verify16(PSPCNVME_SRBEXT srbext);
 UCHAR Scsi_ReadCapacity16(PSPCNVME_SRBEXT srbext);
-// ===== End Scsi_Utils.h =====
 
-// ===== Begin ScsiHandler_InlineUtils.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// SCSI 応答バッファ生成と CDB 解析の inline 補助関数です。
+// MODE SENSE/INQUIRY/READ WRITE の長さ・オフセット変換で使います。
 
 
 inline ULONG CopyToCdbBuffer(PUCHAR& buffer, ULONG& buf_size, PVOID page, ULONG page_size, ULONG &ret_size)
@@ -1500,21 +905,17 @@ inline ULONG CopyToCdbBuffer(PUCHAR& buffer, ULONG& buf_size, PVOID page, ULONG 
         copied_size = buf_size;
 
     RtlCopyMemory(buffer, page, copied_size);
-    buf_size -= copied_size;  //calculate "how many bytes left for my pending copy"?
+    buf_size -= copied_size;
     buffer += copied_size;
     ret_size += copied_size;
     return copied_size;
 }
 inline void FillParamHeader(PMODE_PARAMETER_HEADER header)
 {
-//In a complete page return buffer, the header->ModeDataLength should be
-// => sizeof(followed page data) + sizeof(header) - sizeof(header->ModeDataLength).
-//Here are set header->ModeDataLength to sizeof(MODE_PARAMETER_HEADER) - sizeof(header->ModeDataLength).
-//In following procedure we will set it to header->ModeDataLength += page_size;
     header->ModeDataLength = sizeof(MODE_PARAMETER_HEADER) - sizeof(header->ModeDataLength);
     header->MediumType = DIRECT_ACCESS_DEVICE;
     header->DeviceSpecificParameter = 0;
-    header->BlockDescriptorLength = 0;  //I don't want reply BlockDescriptor  :p
+    header->BlockDescriptorLength = 0;
 }
 inline void FillParamHeader10(PMODE_PARAMETER_HEADER10 header)
 {
@@ -1523,12 +924,11 @@ inline void FillParamHeader10(PMODE_PARAMETER_HEADER10 header)
     REVERSE_BYTES_2(header->ModeDataLength, &mode_data_size);
     header->MediumType = DIRECT_ACCESS_DEVICE;
     header->DeviceSpecificParameter = 0;
-    //I don't want reply BlockDescriptor, so dont set BlockDescriptorLength field  :p
 }
 inline void FillModePage_Caching(CNvmeDevice* devext, PMODE_CACHING_PAGE page)
 {
     page->PageCode = MODE_PAGE_CACHING;
-    page->PageLength = (UCHAR)(sizeof(MODE_CACHING_PAGE) - 2); //sizeof(MODE_CACHING_PAGE) - sizeof(page->PageCode) - sizeof(page->PageLength)
+    page->PageLength = (UCHAR)(sizeof(MODE_CACHING_PAGE) - 2);
     page->ReadDisableCache = !devext->ReadCacheEnabled;
     page->WriteCacheEnable = devext->WriteCacheEnabled;
     page->PageSavable = TRUE;
@@ -1536,14 +936,13 @@ inline void FillModePage_Caching(CNvmeDevice* devext, PMODE_CACHING_PAGE page)
 inline void FillModePage_InfoException(PMODE_INFO_EXCEPTIONS page)
 {
     page->PageCode = MODE_PAGE_FAULT_REPORTING;
-    page->PageLength = (UCHAR)(sizeof(MODE_INFO_EXCEPTIONS) - 2); //sizeof(MODE_INFO_EXCEPTIONS) - sizeof(page->PageCode) - sizeof(page->PageLength)
-    page->ReportMethod = 5;  //Generate no sense
+    page->PageLength = (UCHAR)(sizeof(MODE_INFO_EXCEPTIONS) - 2);
+    page->ReportMethod = 5;
 }
 inline void FillModePage_Control(PMODE_CONTROL_PAGE page)
 {
-    //all fields of MODE_CONTROL_PAGE refer to Seagate SCSI reference "Control Mode page (table 302)" 
     page->PageCode = MODE_PAGE_CONTROL;
-    page->PageLength = (UCHAR)(sizeof(MODE_CONTROL_PAGE) - 2); //sizeof(MODE_CONTROL_PAGE) - sizeof(page->PageCode) - sizeof(page->PageLength)
+    page->PageLength = (UCHAR)(sizeof(MODE_CONTROL_PAGE) - 2);
     page->QueueAlgorithmModifier = 0;
 }
 inline ULONG ReplyModePageCaching(CNvmeDevice* devext, PUCHAR& buffer, ULONG& buf_size, ULONG& ret_size)
@@ -1570,7 +969,6 @@ inline ULONG ReplyModePageInfoExceptionCtrl(PUCHAR& buffer, ULONG& buf_size, ULO
 }
 
 #pragma region ======== Parse SCSI ReadWrite length and offset ======== 
-//Note: In SCSI, all read/write request are in "BLOCKS", not in bytes.
 inline void ParseReadWriteOffsetAndLen(CDB::_CDB6READWRITE &rw, ULONG64 &offset, ULONG &len)
 {
     offset = (rw.LogicalBlockMsb1 << 16) | (rw.LogicalBlockMsb0 << 8) | rw.LogicalBlockLsb;
@@ -1622,139 +1020,17 @@ inline bool ParseReadWriteOffsetAndLen(CDB& cdb, ULONG64& offset, ULONG& len)
     return false;
 }
 #pragma endregion 
-// ===== End ScsiHandler_InlineUtils.h =====
 
-// ===== Begin IoctlScsiMiniport_Handlers.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// IOCTL_SCSI_MINIPORT 系要求のハンドラ宣言です。
 
 
 UCHAR IoctlScsiMiniport_Firmware(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl);
-// ===== End IoctlScsiMiniport_Handlers.h =====
 
-// ===== Begin Ioctl_FirmwareFunctions.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
+// Windows 標準のファームウェア情報取得/更新要求を扱う関数宣言です。
 
 
 UCHAR Firmware_GetInfo(PSPCNVME_SRBEXT srbext);
 UCHAR Firmware_DownloadToAdapter(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, PFIRMWARE_REQUEST_BLOCK request);
 UCHAR Firmware_ActivateSlot(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, PFIRMWARE_REQUEST_BLOCK request);
-// ===== End Ioctl_FirmwareFunctions.h =====
 
-// ===== Begin LicenseTemplate.h =====
-// ================================================================
-// SpcNvme : OpenSource NVMe Driver for Windows 8+
-// Author : Roy Wang(SmokingPC).
-// Licensed by MIT License.
-// 
-// Copyright (C) 2022, Roy Wang (SmokingPC)
-// https://github.com/smokingpc/
-// 
-// NVMe Spec: https://nvmexpress.org/specifications/
-// Contact Me : smokingpc@gmail.com
-// ================================================================
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this softwareand associated documentation files(the "Software"), 
-// to deal in the Software without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and /or sell copies of the Software, and to permit persons to whom the 
-// Software is furnished to do so, subject to the following conditions :
-//
-// The above copyright noticeand this permission notice shall be included in 
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE 
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-// IN THE SOFTWARE.
-// ================================================================
-// [Additional Statement]
-// This Driver is implemented by NVMe Spec 1.3 and Windows Storport Miniport Driver.
-// You can copy, modify, redistribute the source code. 
-// 
-// There is only one requirement to use this source code:
-// PLEASE DO NOT remove or modify the "original author" of this codes.
-// Keep "original author" declaration unmodified.
-// 
-// Enjoy it.
-// ================================================================
 
-// ===== End LicenseTemplate.h =====

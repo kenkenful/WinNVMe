@@ -1,7 +1,16 @@
-#include "winnvme.h"
+﻿#include "winnvme.h"
 
-// ===== Begin WdmUtils.cpp =====
+// Windows Storport ミニポートとして動作する NVMe ドライバの実装本体です。
+// このファイルは複数の実装ファイルを結合した形になっており、DriverEntry で
+// Storport へコールバックを登録し、HwBuildIo/HwStartIo で SRB を受け取り、
+// SCSI CDB または IOCTL を NVMe Admin/I/O コマンドへ変換します。
+// CNvmeDevice はコントローラ状態を、CNvmeQueue は Submission/Completion Queue を、
+// SPCNVME_SRBEXT は要求ごとの一時状態と完了コールバックを管理します。
 
+// カーネル C++ 用の共通ユーティリティです。通常の CRT ヒープは使えないため、
+// new/delete を ExAllocatePoolWithTag/ExFreePool に結び付けています。
+// CDebugCallInOut とスピンロックラッパは、例外を使わないカーネルコードでも
+// スコープ終了時に後始末できるようにするための RAII 補助です。
 void* __cdecl operator new(size_t size)
 {
     return ExAllocatePoolWithTag(PagedPool, size, CPP_TAG);
@@ -142,10 +151,10 @@ void DebugScsiOpCode(UCHAR opcode)
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DBG_FILTER, "%s Got SCSI Cmd(0x%02X)\n", DEBUG_PREFIX, opcode);
 }
 
-// ===== End WdmUtils.cpp =====
 
-// ===== Begin IoctlScsiMiniport_Handlers.cpp =====
-
+// SRB_FUNCTION_IO_CONTROL のうち IOCTL_SCSI_MINIPORT_* 系を処理します。
+// Windows のストレージスタックは SRB_IO_CONTROL を先頭にしたバッファを渡すため、
+// Signature と ControlCode/Function を確認して、対応する処理へ振り分けます。
 UCHAR IoctlScsiMiniport_Firmware(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl)
 {
     ULONG data_len = srbext->DataBufLen();
@@ -157,34 +166,25 @@ UCHAR IoctlScsiMiniport_Firmware(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl)
         return SRB_STATUS_INVALID_PARAMETER;
     }
 
-    //refer to https://docs.microsoft.com/en-us/windows-hardware/drivers/storage/upgrading-firmware-for-an-nvme-device
-    //the input buffer layout should be [SRB_IO_CONTROL][FIRMWARE_REQUEST_BLOCK]
-    //output buffer layout should be [SRB_IO_CONTROL][FIRMWARE_REQUEST_BLOCK][RET BUFFER]
-    //all of them are located in srb data buffer.
     switch (request->Function)
     {
     case FIRMWARE_FUNCTION_GET_INFO:
         srb_status = Firmware_GetInfo(srbext);
         break;
     case FIRMWARE_FUNCTION_DOWNLOAD:
-        //srb_status = Firmware_DownloadToAdapter(srbext, ioctl, request);
         srb_status = SRB_STATUS_INVALID_REQUEST;
         break;
     case FIRMWARE_FUNCTION_ACTIVATE:
-        //srb_status = Firmware_ActivateSlot(srbext, ioctl, request);
         srb_status = SRB_STATUS_INVALID_REQUEST;
         break;
     }
 
-    //In Firmware commands, SRBSTATUS only indicates 
-    //"is this command sent to device successfully?"
-    //The result of command stored in ioctl->ReturnCode.
     return srb_status;
 }
-// ===== End IoctlScsiMiniport_Handlers.cpp =====
 
-// ===== Begin HandleAdapterControl.cpp =====
-
+// Storport から通知されるアダプタ制御イベントの補助処理です。
+// サポートする制御種別の申告、再起動、サプライズリムーブ、電源遷移などは
+// HwAdapterControl からここへ分岐します。
 SCSI_ADAPTER_CONTROL_STATUS Handle_QuerySupportedControlTypes(
     PSCSI_SUPPORTED_CONTROL_TYPE_LIST list)
 {
@@ -208,10 +208,9 @@ SCSI_ADAPTER_CONTROL_STATUS Handle_RestartAdapter(CNvmeDevice* devext)
     devext->RestartController();
     return ScsiAdapterControlSuccess;
 }
-// ===== End HandleAdapterControl.cpp =====
 
-// ===== Begin Ioctl_FirmwareFunctions.cpp =====
-SPC_SRBEXT_COMPLETION Complete_FirmwareInfo;
+// Windows 標準のファームウェア情報取得要求を NVMe Admin Command へ変換します。
+// 現状は GET_INFO を中心に実装しており、DOWNLOAD/ACTIVATE は安全側で無効化されています。
 
 static ULONG NvmeStatus2FirmwareStatus(NVME_COMMAND_STATUS *status)
 {
@@ -252,15 +251,13 @@ static void FillFirmwareInfoV2(
         ret_info->ImagePayloadAlignment = sizeof(ULONG);
     else
         ret_info->ImagePayloadAlignment = (ULONG)(PAGE_SIZE * ctrl->FWUG);
-    //max size of payload in single piece of download image cmd...
-    //refer to https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/upgrading-firmware-for-an-nvme-device
     ret_info->ImagePayloadMaxSize = min(nvme->MaxTxSize, (128 * PAGE_SIZE));
 
     for (UCHAR i = 0; i < ctrl->FRMW.SlotCount; i++)
     {
         PSTORAGE_FIRMWARE_SLOT_INFO_V2 slot = &ret_info->Slot[i];
         slot->ReadOnly = FALSE;
-        slot->SlotNumber = i + 1;   //slot id is 1-based.
+        slot->SlotNumber = i + 1;
         RtlZeroMemory(slot->Revision, STORAGE_FIRMWARE_SLOT_INFO_V2_REVISION_LENGTH);
         RtlCopyMemory(slot->Revision, &logpage->FRS[i], sizeof(ULONGLONG));
     }
@@ -314,14 +311,12 @@ VOID Complete_FirmwareInfo(SPCNVME_SRBEXT *srbext)
         goto END;
     }
 
-    //Caller should provide V1 structure with enough slot space
     if (buf_len < (sizeof(STORAGE_FIRMWARE_INFO) + (sizeof(STORAGE_FIRMWARE_SLOT_INFO) * total_slots)))
     {
         fw_status = FIRMWARE_STATUS_OUTPUT_BUFFER_TOO_SMALL;
         srb_status = SRB_STATUS_INVALID_PARAMETER;
         goto END;
     }
-    //translate NVME status code to firmware status code
     fw_status = NvmeStatus2FirmwareStatus(&srbext->NvmeCpl.DW3.Status);
     if(FIRMWARE_STATUS_SUCCESS != fw_status)
         goto END;
@@ -381,10 +376,10 @@ UCHAR Firmware_ActivateSlot(PSPCNVME_SRBEXT srbext, PSRB_IO_CONTROL ioctl, PFIRM
     UNREFERENCED_PARAMETER(request);
     return SRB_STATUS_INVALID_REQUEST;
 }
-// ===== End Ioctl_FirmwareFunctions.cpp =====
 
-// ===== Begin NvmePrpBuilder.cpp =====
-
+// NVMe の PRP(Physical Region Page) を組み立てる処理です。
+// データバッファの物理ページを PRP1/PRP2 または PRP list に変換し、
+// コントローラが DMA で参照できる形にします。
 static inline size_t GetDistanceToNextPage(PUCHAR ptr)
 {
     return (((PUCHAR)PAGE_ALIGN(ptr) + PAGE_SIZE) - ptr);
@@ -428,9 +423,6 @@ static void BuildPrp2List(PVOID prp2, PVOID ptr, size_t size)
 
 bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t buf_size)
 {
-    //refer to NVMe 1.3 chapter 4.3
-    //Physical Region Page Entry and List
-    //The PBAO of PRP entry should align to DWORD.
     PUCHAR cursor = (PUCHAR) buffer;
     size_t size_left = buf_size;
     size_t distance = 0;
@@ -438,8 +430,6 @@ bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t bu
     BuildPrp1(cmd->PRP1, cursor);
     distance = GetDistanceToNextPage(cursor);
 
-    //this buffer is smaller than PAGE_SIZE and not cross page boundary. 
-    //Using PRP1 is enough...
     if(distance > size_left)
         return true;
 
@@ -452,7 +442,6 @@ bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t bu
     }
     else
     {
-        //PRP2 need list
         srbext->Prp2VA = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, TAG_PRP2);
         if(NULL == srbext->Prp2VA)
             return false;
@@ -465,20 +454,18 @@ bool BuildPrp(PSPCNVME_SRBEXT srbext, PNVME_COMMAND cmd, PVOID buffer, size_t bu
     }
     return true;
 }
-// ===== End NvmePrpBuilder.cpp =====
 
-// ===== Begin Scsi_Utils.cpp =====
-SPC_SRBEXT_COMPLETION Complete_ScsiReadWrite;
+// SCSI の READ/WRITE 系 CDB を NVMe Read/Write コマンドへ橋渡しします。
+// SCSI の転送長とオフセットはブロック単位なので、Namespace ID と範囲を確認してから
+// I/O Queue へ投入します。
 
 void Complete_ScsiReadWrite(SPCNVME_SRBEXT *srbext)
 {
     srbext->CleanUp();
-    //srbext->CompleteSrb(srbext->NvmeCpl.DW3.Status);
 }
 
 UCHAR Scsi_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG len, bool is_write)
 {
-    //the SCSI I/O are based for BLOCKs of device, not bytes....
     UCHAR srb_status = SRB_STATUS_PENDING;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     ULONG nsid = srbext->Lun() + 1;
@@ -487,7 +474,6 @@ UCHAR Scsi_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG len, bool is_
         return SRB_STATUS_ERROR;
 
     BuiildCmd_ReadWrite(srbext, offset, len, is_write);
-    //srbext->CompletionCB = NULL;
     status = srbext->DevExt->SubmitIoCmd(srbext, &srbext->NvmeCmd);
     if (!NT_SUCCESS(status))
     {
@@ -502,10 +488,10 @@ UCHAR Scsi_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG len, bool is_
 
     return srb_status;
 }
-// ===== End Scsi_Utils.cpp =====
 
-// ===== Begin SrbExt.cpp =====
-
+// STORAGE_REQUEST_BLOCK(SRB) に紐付くドライバ専用拡張領域です。
+// 元 SRB、NVMe コマンド、一時バッファ、PRP list、完了コールバックをまとめて保持し、
+// BuildIo から Queue 完了まで同じ文脈を受け渡します。
 _SPCNVME_SRBEXT* _SPCNVME_SRBEXT::InitSrbExt(PVOID devext, PSTORAGE_REQUEST_BLOCK srb)
 {
 	PSPCNVME_SRBEXT srbext = (PSPCNVME_SRBEXT)SrbGetMiniportContext(srb);
@@ -546,7 +532,6 @@ void _SPCNVME_SRBEXT::CompleteSrb(NVME_COMMAND_STATUS &nvme_status)
 }
 void _SPCNVME_SRBEXT::CompleteSrb(UCHAR status)
 {
-    this->SrbStatus = status;
     if (NULL != Srb)
     {
         SetScsiSenseBySrbStatus(Srb, status);
@@ -622,9 +607,9 @@ PSRBEX_DATA_PNP _SPCNVME_SRBEXT::SrbDataPnp()
         return (PSRBEX_DATA_PNP)SrbGetSrbExDataByType(Srb, SrbExDataTypePnP);
     return NULL;
 }
-// ===== End SrbExt.cpp =====
 
-// ===== Begin NvmeCmdBuilder.cpp =====
+// NVMe Admin/I/O コマンドの Command Dword を設定するビルダ群です。
+// SCSI ハンドラや初期化処理は、ここで作った NVME_COMMAND を Queue に投入します。
 void BuiildCmd_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG blocks, bool is_write)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -640,7 +625,6 @@ void BuiildCmd_ReadWrite(PSPCNVME_SRBEXT srbext, ULONG64 offset, ULONG blocks, b
     cmd->u.READWRITE.CDW12.NLB = blocks - 1;
 }
 
-//to build NVME_COMMAND for IdentifyController command
 void BuildCmd_IdentCtrler(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA data)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -654,8 +638,6 @@ void BuildCmd_IdentCtrler(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA
 }
 void BuildCmd_IdentActiveNsidList(PSPCNVME_SRBEXT srbext, PVOID nsid_list, size_t list_size)
 {
-//nsid_list is a ULONG array buffer to retrieve all nsid which is active in this NVMe.
-//list_size is size IN BYTES of nsid_list.
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
     RtlZeroMemory(cmd, sizeof(NVME_COMMAND));
     cmd->CDW0.OPC = NVME_ADMIN_COMMAND_IDENTIFY;
@@ -677,8 +659,6 @@ void BuildCmd_IdentSpecifiedNS(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_NAMESPACE_
 }
 void BuildCmd_IdentAllNSList(PSPCNVME_SRBEXT srbext, PVOID ns_buf, size_t buf_size)
 {
-    //ns_buf is a array to retrieve all NameSpace list.
-    //buf_size is SIZE IN BYTES of ns_buf.
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
     RtlZeroMemory(cmd, sizeof(NVME_COMMAND));
     cmd->CDW0.OPC = NVME_ADMIN_COMMAND_IDENTIFY;
@@ -696,7 +676,6 @@ void BuildCmd_SetIoQueueCount(PSPCNVME_SRBEXT srbext, USHORT count)
     cmd->CDW0.CID = srbext->ScsiQTag();
     cmd->u.SETFEATURES.CDW10.FID = NVME_FEATURE_NUMBER_OF_QUEUES;
 
-    //NSQ and NCQ should be 0 based.
     cmd->u.SETFEATURES.CDW11.NumberOfQueues.NSQ =
         cmd->u.SETFEATURES.CDW11.NumberOfQueues.NCQ = count - 1;
 }
@@ -712,7 +691,7 @@ void BuildCmd_RegIoSubQ(PSPCNVME_SRBEXT srbext, CNvmeQueue *queue)
     cmd->PRP1 = (ULONG64)paddr.QuadPart;
     cmd->NSID = NVME_CONST::UNSPECIFIC_NSID;
     cmd->u.CREATEIOSQ.CDW10.QID = queue->QueueID;
-    cmd->u.CREATEIOSQ.CDW10.QSIZE = queue->Depth - 1; //0-based value
+    cmd->u.CREATEIOSQ.CDW10.QSIZE = queue->Depth - 1;
     cmd->u.CREATEIOSQ.CDW11.CQID = queue->QueueID;;
     cmd->u.CREATEIOSQ.CDW11.PC = TRUE;
     cmd->u.CREATEIOSQ.CDW11.QPRIO = NVME_NVM_QUEUE_PRIORITY_HIGH;
@@ -729,7 +708,7 @@ void BuildCmd_RegIoCplQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
     cmd->PRP1 = (ULONG64)paddr.QuadPart;
     cmd->NSID = NVME_CONST::UNSPECIFIC_NSID;
     cmd->u.CREATEIOCQ.CDW10.QID = queue->QueueID;
-    cmd->u.CREATEIOCQ.CDW10.QSIZE = queue->Depth - 1; //0-based value
+    cmd->u.CREATEIOCQ.CDW10.QSIZE = queue->Depth - 1;
     cmd->u.CREATEIOCQ.CDW11.IEN = TRUE;
     cmd->u.CREATEIOCQ.CDW11.IV = (queue->Type == QUEUE_TYPE::ADM_QUEUE) ? 0 : queue->QueueID;
     cmd->u.CREATEIOCQ.CDW11.PC = TRUE;
@@ -754,9 +733,6 @@ void BuildCmd_UnRegIoCplQ(PSPCNVME_SRBEXT srbext, CNvmeQueue* queue)
 }
 void BuildCmd_InterruptCoalescing(PSPCNVME_SRBEXT srbext, UCHAR threshold, UCHAR interval)
 {
-//threshold : how many interrupt collected then fire interrupt once?
-//interval : how much time to waiting collect coalesced interrupt?
-//=> if (merged interrupt >= threshold || waiting merge time >= interval), then device fire INTERRUPT once
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
     RtlZeroMemory(cmd, sizeof(NVME_COMMAND));
     cmd->CDW0.OPC = NVME_ADMIN_COMMAND_SET_FEATURES;
@@ -782,7 +758,6 @@ void BuildCmd_SetArbitration(PSPCNVME_SRBEXT srbext)
 void BuildCmd_SyncHostTime(PSPCNVME_SRBEXT srbext, LARGE_INTEGER *timestamp)
 {
     UNREFERENCED_PARAMETER(timestamp);
-    //KeQuerySystemTime() get system tick(100 ns) count since 1601/1/1 00:00:00
     LARGE_INTEGER systime = { 0 };
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
     LARGE_INTEGER elapsed = { 0 };
@@ -797,20 +772,8 @@ void BuildCmd_SyncHostTime(PSPCNVME_SRBEXT srbext, LARGE_INTEGER *timestamp)
     cmd->NSID = NVME_CONST::UNSPECIFIC_NSID;
     cmd->u.SETFEATURES.CDW10.FID = NVME_FEATURE_TIMESTAMP;
 
-    //PVOID timestamp = NULL;
-    //ULONG size = PAGE_SIZE;
-    //ULONG status = StorPortAllocatePool(devext, size, TAG_GENBUF, &timestamp);
-    //if (STOR_STATUS_SUCCESS != status)
-    //    return FALSE;
-    //RtlZeroMemory(timestamp, size);
-    //RtlCopyMemory(timestamp, &elapsed, sizeof(LARGE_INTEGER));
 
-    //cmd.PRP1 = StorPortGetPhysicalAddress(devext, NULL, timestamp, &size).QuadPart;
 
-    ////implement wait
-    //return STATUS_INTERNAL_ERROR;
-    ////submit command
-    //bool ok = devext->AdminQueue->SubmitCmd(&cmd, NULL, CMD_CTX_TYPE::WAIT_EVENT);
 }
 
 void BuildCmd_GetFirmwareSlotsInfo(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_INFO_LOG info)
@@ -821,7 +784,6 @@ void BuildCmd_GetFirmwareSlotsInfo(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_I
     cmd->CDW0.CID = srbext->ScsiQTag();
     cmd->NSID = NVME_CONST::UNSPECIFIC_NSID;
 
-    //In this command, we need "count of DWORD" not "size in bytes".
     ULONG dword_count = (ULONG)(sizeof(NVME_FIRMWARE_SLOT_INFO_LOG) >> 2);
     cmd->u.GETLOGPAGE.CDW10_V13.NUMDL = (USHORT) (dword_count & 0x0000FFFF);
     cmd->u.GETLOGPAGE.CDW10_V13.LID = NVME_LOG_PAGE_FIRMWARE_SLOT_INFO;
@@ -830,7 +792,6 @@ void BuildCmd_GetFirmwareSlotsInfo(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_I
     BuildPrp(srbext, cmd, info, sizeof(NVME_FIRMWARE_SLOT_INFO_LOG));
 }
 
-//NVMe v1.0 and v1.3 has different cmd structure in this command.
 void BuildCmd_GetFirmwareSlotsInfoV1(PSPCNVME_SRBEXT srbext, PNVME_FIRMWARE_SLOT_INFO_LOG info)
 {
     PNVME_COMMAND cmd = &srbext->NvmeCmd;
@@ -854,7 +815,6 @@ void BuildCmd_AdminSecuritySend(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
     cmd->CDW0.CID = srbext->ScsiQTag();
     cmd->NSID = nsid;
 
-    //In this command, we need "count of DWORD" not "size in bytes".
     cmd->u.SECURITYSEND.CDW10.SECP = cdb->SECURITY_PROTOCOL_OUT.SecurityProtocol;
     USHORT spsp = 0;
     REVERSE_BYTES_2(&spsp, cdb->SECURITY_PROTOCOL_OUT.SecurityProtocolSpecific);
@@ -873,7 +833,6 @@ void BuildCmd_AdminSecurityRecv(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
     cmd->CDW0.CID = srbext->ScsiQTag();
     cmd->NSID = nsid;
 
-    //In this command, we need "count of DWORD" not "size in bytes".
     cmd->u.SECURITYSEND.CDW10.SECP = cdb->SECURITY_PROTOCOL_IN.SecurityProtocol;
     USHORT spsp = 0;
     REVERSE_BYTES_2(&spsp, cdb->SECURITY_PROTOCOL_IN.SecurityProtocolSpecific);
@@ -884,14 +843,14 @@ void BuildCmd_AdminSecurityRecv(PSPCNVME_SRBEXT srbext, ULONG nsid, PCDB cdb)
 
     BuildPrp(srbext, cmd, srbext->DataBuf(), srbext->DataBufLen());
 }
-// ===== End NvmeCmdBuilder.cpp =====
 
-// ===== Begin ScsiHandler_CDB10.cpp =====
-
+// 10 バイト CDB の SCSI コマンドを処理します。
+// READ/WRITE/READ CAPACITY/MODE SENSE など、OS が通常のディスクとして認識するための
+// 基本応答を NVMe の名前空間情報や I/O コマンドから生成します。
 UCHAR Scsi_Read10(PSPCNVME_SRBEXT srbext)
 {
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB10, offset, len);
@@ -899,8 +858,8 @@ UCHAR Scsi_Read10(PSPCNVME_SRBEXT srbext)
 }
 UCHAR Scsi_Write10(PSPCNVME_SRBEXT srbext)
 {
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB10, offset, len);
@@ -916,7 +875,6 @@ UCHAR Scsi_ReadCapacity10(PSPCNVME_SRBEXT srbext)
     ULONG64 blocks = 0;
     UCHAR lun = srbext->Lun();
 
-    //LUN is zero based...
     if(lun >= srbext->DevExt->NamespaceCount)
     { 
         srb_status = SRB_STATUS_INVALID_LUN;
@@ -935,8 +893,6 @@ UCHAR Scsi_ReadCapacity10(PSPCNVME_SRBEXT srbext)
         goto END;
     }
     
-    //LogicalBlockAddress is MAX LBA index, it's zero-based id.
-    //**this field is (total LBA count)-1.
     srbext->DevExt->GetNamespaceTotalBlocks(lun + 1, blocks);
     srbext->DevExt->GetNamespaceBlockSize(lun + 1, block_size);
     if (blocks > MAXULONG32)
@@ -945,17 +901,11 @@ UCHAR Scsi_ReadCapacity10(PSPCNVME_SRBEXT srbext)
         ret_size = 0;
         goto END;
     }
-    //NO support thin-provisioning in current stage....
-    //*From SBC - 3 r27:
-    //    *If the RETURNED LOGICAL BLOCK ADDRESS field is set to FFFF_FFFFh,
-    //    * then the application client should issue a READ CAPACITY(16)
-    //    * command(see 5.16) to request that the device server transfer the
-    //    * READ CAPACITY(16) parameter data to the data - in buffer.
     blocks -= 1;
 
     cap->LogicalBlockAddress = cap->BytesPerBlock = 0;
     REVERSE_BYTES_4(&cap->BytesPerBlock, &block_size);
-    REVERSE_BYTES_4(&cap->LogicalBlockAddress, &blocks); //only reverse lower 4 bytes
+    REVERSE_BYTES_4(&cap->LogicalBlockAddress, &blocks);
 
     ret_size = sizeof(READ_CAPACITY_DATA);
     srb_status = SRB_STATUS_SUCCESS;
@@ -969,144 +919,35 @@ UCHAR Scsi_Verify10(PSPCNVME_SRBEXT srbext)
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 
-    ////todo: complete this handler for FULL support of verify
-    //UCHAR srb_status = SRB_STATUS_ERROR;
-    //CRamdisk* disk = srbext->DevExt->RamDisk;
-    //PCDB cdb = srbext->Cdb;
-    //UINT32 lba_start = 0;    //in Blocks, not bytes
-    //REVERSE_BYTES_4(&lba_start, &cdb->CDB10.LogicalBlockByte0);
-    //
-    //UINT16 verify_len = 0;    //in Blocks, not bytes
-    //REVERSE_BYTES_2(&verify_len, &cdb->CDB10.TransferBlocksMsb);
 
-    //if(FALSE == disk->IsExceedLbaRange(lba_start, verify_len))
-    //    srb_status = SRB_STATUS_SUCCESS;
 
-    //SrbSetDataTransferLength(srbext->Srb, 0);
-    //return srb_status;
 }
 UCHAR Scsi_ModeSelect10(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 
-    //UCHAR srb_status = SRB_STATUS_INVALID_REQUEST;
-    //UNREFERENCED_PARAMETER(srbext);
-    //return srb_status;
 }
 UCHAR Scsi_ModeSense10(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 
-//    UCHAR srb_status = SRB_STATUS_ERROR;
-//    PCDB cdb = srbext->Cdb;
-//    PUCHAR buffer = (PUCHAR)srbext->DataBuffer;
-//    PMODE_PARAMETER_HEADER10 header = (PMODE_PARAMETER_HEADER10)buffer;
-//    ULONG buf_size = srbext->DataBufLen;
-//    ULONG ret_size = 0;
-//    ULONG page_size = 0;
-//    ULONG mode_data_size = 0;
-//
-//    if (NULL == buffer || 0 == buf_size)
-//        return SRB_STATUS_ERROR;
-//
-//    if (buf_size < sizeof(MODE_PARAMETER_HEADER10))
-//    {
-//        srb_status = SRB_STATUS_DATA_OVERRUN;
-//        ret_size = sizeof(MODE_PARAMETER_HEADER10);
-//        goto end;
-//    }
-//
-//    FillParamHeader10(header);
-//    buffer += sizeof(MODE_PARAMETER_HEADER10);
-//    buf_size -= sizeof(MODE_PARAMETER_HEADER10);
-//    ret_size += sizeof(MODE_PARAMETER_HEADER10);
-//    REVERSE_BYTES_2(&mode_data_size, header->ModeDataLength);
-//
-//    // Todo: reply real mode sense data
-//    switch (cdb->MODE_SENSE.PageCode)
-//    {
-//        case MODE_PAGE_CACHING:
-//        {
-//            ReplyModePageCaching(buffer, buf_size, ret_size);
-//            mode_data_size += page_size;
-//            srb_status = SRB_STATUS_SUCCESS;
-//            break;
-//        }
-//        case MODE_PAGE_CONTROL:
-//        {
-//            ReplyModePageControl(buffer, buf_size, ret_size);
-//            mode_data_size += page_size;
-//            srb_status = SRB_STATUS_SUCCESS;
-//            break;
-//        }
-//        case MODE_PAGE_FAULT_REPORTING:
-//        {
-//            //in HLK, it required "Information Exception Control Page".
-//            //But it is renamed to MODE_PAGE_FAULT_REPORTING in Windows Storport ....
-//            //refet to https://www.t10.org/ftp/t10/document.94/94-190r3.pdf
-//            ReplyModePageInfoExceptionCtrl(buffer, buf_size, ret_size);
-//            mode_data_size += page_size;
-//            srb_status = SRB_STATUS_SUCCESS;
-//            break;
-//        }
-//        case MODE_SENSE_RETURN_ALL:
-//        {
-//            if (buf_size > 0)
-//            {
-//                ReplyModePageCaching(buffer, buf_size, ret_size);
-//                mode_data_size += page_size;
-//            }
-//            if (buf_size > 0)
-//            {
-//                ReplyModePageControl(buffer, buf_size, ret_size);
-//                mode_data_size += page_size;
-//            }
-//            if (buf_size > 0)
-//            {
-//                ReplyModePageInfoExceptionCtrl(buffer, buf_size, ret_size);
-//                mode_data_size += page_size;
-//            }
-//
-//            srb_status = SRB_STATUS_SUCCESS;
-//            break;
-//        }
-//        default:
-//        {
-//            page_size = 0;
-//            srb_status = SRB_STATUS_SUCCESS;
-//            break;
-//        }
-//    }
-//    REVERSE_BYTES_2(header->ModeDataLength, &mode_data_size);
-//
-//end:
-//    SrbSetDataTransferLength(srbext->Srb, ret_size);
-//    return srb_status;
 }
 
-// ===== End ScsiHandler_CDB10.cpp =====
 
-// ===== Begin ScsiHandler_CDB12.cpp =====
-
+// 12 バイト CDB の SCSI コマンドを処理します。
+// REPORT LUNS、READ/WRITE12、SECURITY PROTOCOL IN/OUT などを扱います。
 UCHAR Scsi_ReportLuns12(PSPCNVME_SRBEXT srbext)
 {
-//according SEAGATE SCSI reference, SCSIOP_REPORT_LUNS
-//is used to query SCSI Logical Unit class address.
-//each address are 8 bytes. In current windows system 
-//I can't find reference data to determine LU address.
-//MSDN also said it's NOT recommend to translate this SCSI 
-//command for NVMe device.
-//So I skip this command....
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 }
 
 UCHAR Scsi_Read12(PSPCNVME_SRBEXT srbext)
 {
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB12, offset, len);
@@ -1115,8 +956,8 @@ UCHAR Scsi_Read12(PSPCNVME_SRBEXT srbext)
 
 UCHAR Scsi_Write12(PSPCNVME_SRBEXT srbext)
 {
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB12, offset, len);
@@ -1128,30 +969,12 @@ UCHAR Scsi_Verify12(PSPCNVME_SRBEXT srbext)
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 
-    ////todo: complete this handler for FULL support of verify
-    //UCHAR srb_status = SRB_STATUS_ERROR;
-    //CRamdisk* disk = srbext->DevExt->RamDisk;
-    //PCDB cdb = srbext->Cdb;
-    //UINT32 lba_start = 0;    //in Blocks, not bytes
-    //REVERSE_BYTES_4(&lba_start, cdb->CDB12.LogicalBlock);
 
-    //UINT32 verify_len = 0;    //in Blocks, not bytes
-    //REVERSE_BYTES_4(&verify_len, &cdb->CDB12.TransferLength);
 
-    //if (FALSE == disk->IsExceedLbaRange(lba_start, verify_len))
-    //    srb_status = SRB_STATUS_SUCCESS;
 
-    //SrbSetDataTransferLength(srbext->Srb, 0);
-    //return srb_status;
 }
 
-//In windows, SED(Self Encrypted Disk) features are implemented by 
-//SCSIOP_SECURITY_PROTOCOL_IN and SCSIOP_SECURITY_PROTOCOL_OUT.
-//SED tool (e.g. sed-utils) send SED cmd to disk via IOCTL_SCSI_PASS_THROUGH_DIRECT,
-//which carried CDB data with SCSIOP_SECURITY_PROTOCOL_IN and SCSIOP_SECURITY_PROTOCOL_OUT.
-//Then in disk.sys it picks CDB data and send to NVMe driver via SCSI command.
 
-//SCSIOP_SECURITY_PROTOCOL_IN => Host retrieve security protocol data from device
 UCHAR Scsi_SecurityProtocolIn(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_SUCCESS;
@@ -1160,8 +983,6 @@ UCHAR Scsi_SecurityProtocolIn(PSPCNVME_SRBEXT srbext)
     if(!is_support)
         return SRB_STATUS_ERROR;
 
-    //Note: In this command , payload data should be aligned to block size 
-    //of namespace format. Usually it is PAGE_SIZE from app.
     BuildCmd_AdminSecurityRecv(srbext, NVME_CONST::DEFAULT_CTRLID, srbext->Cdb());
     status = srbext->DevExt->SubmitAdmCmd(srbext, &srbext->NvmeCmd);
     if (!NT_SUCCESS(status))
@@ -1171,7 +992,6 @@ UCHAR Scsi_SecurityProtocolIn(PSPCNVME_SRBEXT srbext)
 
     return srb_status;
 }
-//SCSIOP_SECURITY_PROTOCOL_OUT => Host send security protocol data to device
 UCHAR Scsi_SecurityProtocolOut(PSPCNVME_SRBEXT srbext)
 {
     UCHAR srb_status = SRB_STATUS_SUCCESS;
@@ -1180,8 +1000,6 @@ UCHAR Scsi_SecurityProtocolOut(PSPCNVME_SRBEXT srbext)
     if (!is_support)
         return SRB_STATUS_ERROR;
 
-    //Note: In this command , payload data should be aligned to block size 
-    //of namespace format. Usually it is PAGE_SIZE from app.
     BuildCmd_AdminSecuritySend(srbext, NVME_CONST::DEFAULT_CTRLID, srbext->Cdb());
     status = srbext->DevExt->SubmitAdmCmd(srbext, &srbext->NvmeCmd);
     if (!NT_SUCCESS(status))
@@ -1191,9 +1009,9 @@ UCHAR Scsi_SecurityProtocolOut(PSPCNVME_SRBEXT srbext)
 
     return srb_status;
 }
-// ===== End ScsiHandler_CDB12.cpp =====
 
-// ===== Begin ScsiHandler_CDB16.cpp =====
+// 16 バイト CDB の SCSI コマンドを処理します。
+// 大容量ディスクで必要になる READ/WRITE16 と READ CAPACITY16 が中心です。
 inline void FillReadCapacityEx(UCHAR lun, PSPCNVME_SRBEXT srbext)
 {
     PREAD_CAPACITY_DATA_EX cap = (PREAD_CAPACITY_DATA_EX)srbext->DataBuf();
@@ -1201,8 +1019,6 @@ inline void FillReadCapacityEx(UCHAR lun, PSPCNVME_SRBEXT srbext)
     ULONG64 blocks = 0;
     srbext->DevExt->GetNamespaceBlockSize(lun+1, block_size);
 
-    //LogicalBlockAddress is MAX LBA index, it's zero-based id.
-    //**this field is (total LBA count)-1.
     srbext->DevExt->GetNamespaceTotalBlocks(lun+1, blocks);
     blocks -= 1;
     REVERSE_BYTES_4(&cap->BytesPerBlock, &block_size);
@@ -1211,8 +1027,8 @@ inline void FillReadCapacityEx(UCHAR lun, PSPCNVME_SRBEXT srbext)
 
 UCHAR Scsi_Read16(PSPCNVME_SRBEXT srbext)
 {
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB16, offset, len);
@@ -1221,8 +1037,8 @@ UCHAR Scsi_Read16(PSPCNVME_SRBEXT srbext)
 
 UCHAR Scsi_Write16(PSPCNVME_SRBEXT srbext)
 {
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB16, offset, len);
@@ -1233,22 +1049,9 @@ UCHAR Scsi_Verify16(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
-    //todo: complete this handler for FULL support of verify
-    //UCHAR srb_status = SRB_STATUS_ERROR;
-    //CRamdisk* disk = srbext->DevExt->RamDisk;
-    //PCDB cdb = srbext->Cdb;
-    //INT64 lba_start = 0;    //in Blocks, not bytes
-    //
-    //REVERSE_BYTES_8(&lba_start, cdb->CDB16.LogicalBlock);
 
-    //UINT32 verify_len = 0;    //in Blocks, not bytes
-    //REVERSE_BYTES_4(&verify_len, &cdb->CDB16.TransferLength);
 
-    //if (FALSE == disk->IsExceedLbaRange(lba_start, verify_len))
-    //    srb_status = SRB_STATUS_SUCCESS;
 
-    //SrbSetDataTransferLength(srbext->Srb, 0);
-    //return srb_status;
 }
 
 UCHAR Scsi_ReadCapacity16(PSPCNVME_SRBEXT srbext)
@@ -1260,7 +1063,6 @@ UCHAR Scsi_ReadCapacity16(PSPCNVME_SRBEXT srbext)
     ULONG block_size = 0;
     ULONG64 blocks = 0;
 
-    //LUN is zero based...
     if (lun >= srbext->DevExt->NamespaceCount)
     {
         srb_status = SRB_STATUS_INVALID_LUN;
@@ -1280,8 +1082,6 @@ UCHAR Scsi_ReadCapacity16(PSPCNVME_SRBEXT srbext)
     }
 
     srbext->DevExt->GetNamespaceBlockSize(lun + 1, block_size);
-    //LogicalBlockAddress is MAX LBA index, it's zero-based id.
-    //**this field is (total LBA count)-1.
     srbext->DevExt->GetNamespaceTotalBlocks(lun + 1, blocks);
     blocks -= 1;
     REVERSE_BYTES_4(&cap->BytesPerBlock, &block_size);
@@ -1293,10 +1093,10 @@ END:
     srbext->SetTransferLength(ret_size);
     return srb_status;
 }
-// ===== End ScsiHandler_CDB16.cpp =====
 
-// ===== Begin ScsiHandler_CDB6.cpp =====
-
+// 6 バイト CDB の SCSI コマンドを処理します。
+// INQUIRY、REQUEST SENSE、MODE SENSE など、デバイス認識時に頻繁に呼ばれる
+// レガシー互換の応答をここで生成します。
 typedef struct _CDB6_REQUESTSENSE
 {
     UCHAR OperationCode;
@@ -1305,8 +1105,8 @@ typedef struct _CDB6_REQUESTSENSE
     UCHAR Reserved2[2];
     UCHAR AllocSize;
     struct {
-        UCHAR Link : 1;         //obsoleted by T10
-        UCHAR Flag : 1;         //obsoleted by T10
+        UCHAR Link : 1;
+        UCHAR Flag : 1;
         UCHAR NormalACA : 1;
         UCHAR Reserved : 3;
         UCHAR VenderSpecific : 2;
@@ -1371,11 +1171,10 @@ static UCHAR Reply_VpdIdentifier(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
     ULONG vid_size = (ULONG)strlen((char*)NVME_CONST::VENDOR_ID);
     size_t buf_size = (ULONG)sizeof(VPD_IDENTIFICATION_PAGE) +
                         (ULONG)sizeof(VPD_IDENTIFICATION_DESCRIPTOR)
-                        + nqn_size + vid_size + 1;      //1 more byte for "_"
+                        + nqn_size + vid_size + 1;
     SPC::CAutoPtr<VPD_IDENTIFICATION_PAGE, PagedPool, TAG_VPDPAGE>
         page(new(PagedPool, TAG_VPDPAGE) UCHAR[buf_size]);
 
-    //NQN is too long. So only use VID + SN as Identifier.
     PVPD_IDENTIFICATION_DESCRIPTOR desc = NULL;
     ULONG size = (ULONG)buf_size - sizeof(VPD_IDENTIFICATION_PAGE);
     page->DeviceType = DIRECT_ACCESS_DEVICE;
@@ -1400,8 +1199,6 @@ static UCHAR Reply_VpdIdentifier(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 }
 static UCHAR Reply_VpdBlockLimits(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
 {
-    //Max SCSI transfer block size
-    //question : is it really used in modern windows system? Orz
     ULONG buf_size = sizeof(VPD_BLOCK_LIMITS_PAGE);
     SPC::CAutoPtr<VPD_BLOCK_LIMITS_PAGE, PagedPool, TAG_VPDPAGE>
         page(new(PagedPool, TAG_VPDPAGE) UCHAR[buf_size]);
@@ -1412,12 +1209,9 @@ static UCHAR Reply_VpdBlockLimits(PSPCNVME_SRBEXT srbext, ULONG& ret_size)
     REVERSE_BYTES_2(page->PageLength, &buf_size);
 
     ULONG max_tx = srbext->DevExt->MaxTxSize;
-    //tell I/O system: max tx size and optimal tx size of this adapter.
     REVERSE_BYTES_4(page->MaximumTransferLength, &max_tx);
     REVERSE_BYTES_4(page->OptimalTransferLength, &max_tx);
 
-    //Refer to SCSI SBC3 doc or SCSI reference Block Limits VPD page_ptr.
-    //http://www.13thmonkey.org/documentation/SCSI/sbc3r25.pdf
     USHORT granularity = 4;
     REVERSE_BYTES_2(page->OptimalTransferLengthGranularity, &granularity);
 
@@ -1436,7 +1230,7 @@ static UCHAR Reply_VpdBlockDeviceCharacteristics(PSPCNVME_SRBEXT srbext, ULONG& 
     page->DeviceTypeQualifier = DEVICE_CONNECTED;
     page->PageCode = VPD_BLOCK_DEVICE_CHARACTERISTICS;
     page->PageLength = (UCHAR)buf_size;
-    page->MediumRotationRateLsb = 1;        //todo: what is this?
+    page->MediumRotationRateLsb = 1;
     page->NominalFormFactor = 0;
 
     ret_size = min(srbext->DataBufLen(), buf_size);
@@ -1482,7 +1276,7 @@ static void BuildInquiryData(PINQUIRYDATA data, char* vid, char* pid, char* rev)
     data->NormACA = 0;
     data->HiSupport = 0;
     data->ResponseDataFormat = 2;
-    data->AdditionalLength = INQUIRYDATABUFFERSIZE - 5;  // Amount of data we are returning
+    data->AdditionalLength = INQUIRYDATABUFFERSIZE - 5;
     data->EnclosureServices = 0;
     data->MediumChanger = 0;
     data->CommandQueue = 1;
@@ -1492,7 +1286,7 @@ static void BuildInquiryData(PINQUIRYDATA data, char* vid, char* pid, char* rev)
     data->Reserved3[0] = 0;
 
     data->Wide32Bit = TRUE;
-    data->LinkedCommands = FALSE;   // No Linked Commands
+    data->LinkedCommands = FALSE;
     RtlCopyMemory((PUCHAR)&data->VendorId[0], vid, sizeof(data->VendorId));
     RtlCopyMemory((PUCHAR)&data->ProductId[0], pid, sizeof(data->ProductId));
     RtlCopyMemory((PUCHAR)&data->ProductRevisionLevel[0], rev, sizeof(data->ProductRevisionLevel));
@@ -1503,56 +1297,16 @@ UCHAR Scsi_RequestSense6(PSPCNVME_SRBEXT srbext)
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 
-    ////request sense is used to query error information from device.
-    ////device should reply SENSE_DATA structure.
-    ////Todo: return real sense data back....
-    //UCHAR srb_status = SRB_STATUS_ERROR;
-    //PCDB cdb = srbext->Cdb;
-    //PCDB6_REQUESTSENSE request = (PCDB6_REQUESTSENSE) cdb->AsByte;
-    //UINT32 alloc_size = request->AllocSize;     //cdb->CDB6GENERIC.CommandUniqueBytes[2];
-    //UINT8 format = request->DescFormat;   //cdb->CDB6GENERIC.Immediate;
 
-    //ULONG copy_size = 0;
 
-    ////DescFormat field indicates "which format of sense data should be returned?"
-    ////1 == descriptor format sense data shall be returned. (desc header + multiple SENSE_DATA)
-    ////0 == return fixed format data (just return one SENSE_DATA structure)
-    //SENSE_DATA_EX data = {0};
-    //if (1 == format)
-    //{
-    //    data.DescriptorData.ErrorCode = SCSI_SENSE_ERRORCODE_DESCRIPTOR_CURRENT;
-    //    data.DescriptorData.SenseKey = SCSI_SENSE_NO_SENSE;
-    //    data.DescriptorData.AdditionalSenseCode = SCSI_ADSENSE_NO_SENSE;
-    //    data.DescriptorData.AdditionalSenseCodeQualifier = 0;
-    //    data.DescriptorData.AdditionalSenseLength = 0;
-    //    srb_status = SRB_STATUS_SUCCESS;
-    //    copy_size = sizeof(DESCRIPTOR_SENSE_DATA);
-    //}
-    //else
-    //{
-    //    /* Fixed Format Sense Data */
-    //    data.FixedData.ErrorCode = SCSI_SENSE_ERRORCODE_FIXED_CURRENT;
-    //    data.FixedData.SenseKey = SCSI_SENSE_NO_SENSE;
-    //    data.FixedData.AdditionalSenseCode = SCSI_ADSENSE_NO_SENSE;
-    //    data.FixedData.AdditionalSenseCodeQualifier = 0;
-    //    data.FixedData.AdditionalSenseLength = 0;
 
-    //    srb_status = SRB_STATUS_SUCCESS;
-    //    copy_size = sizeof(SENSE_DATA);
-    //}
 
-    //if (copy_size > alloc_size)
-    //    copy_size = alloc_size;
 
-    //StorPortCopyMemory(srbext->DataBuffer, &data, copy_size);
-    //SrbSetDataTransferLength(srbext->Srb, copy_size);
-    //return srb_status;
 }
 UCHAR Scsi_Read6(PSPCNVME_SRBEXT srbext)
 {
-//the SCSI I/O are based for BLOCKs of device, not bytes....
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB6READWRITE, offset, len);
@@ -1560,9 +1314,8 @@ UCHAR Scsi_Read6(PSPCNVME_SRBEXT srbext)
 }
 UCHAR Scsi_Write6(PSPCNVME_SRBEXT srbext)
 {
-    //the SCSI I/O are based for BLOCKs of device, not bytes....
-    ULONG64 offset = 0; //in blocks
-    ULONG len = 0;    //in blocks
+    ULONG64 offset = 0;
+    ULONG len = 0;
     PCDB cdb = srbext->Cdb();
 
     ParseReadWriteOffsetAndLen(cdb->CDB6READWRITE, offset, len);
@@ -1590,9 +1343,6 @@ UCHAR Scsi_Inquiry6(PSPCNVME_SRBEXT srbext)
             ULONG size = srbext->DataBufLen();
             ret_size = 0;
             srb_status = SRB_STATUS_DATA_OVERRUN;
-            //in Win2000 and older version, NT SCSI system only query 
-            //INQUIRYDATABUFFERSIZE bytes.
-            //Since WinXP, it should return sizeof(INQUIRYDATA) bytes data. 
             if(size >= INQUIRYDATABUFFERSIZE)
             {
                 RtlZeroMemory(srbext->DataBuf(), srbext->DataBufLen());
@@ -1610,7 +1360,6 @@ UCHAR Scsi_Inquiry6(PSPCNVME_SRBEXT srbext)
 }
 UCHAR Scsi_Verify6(PSPCNVME_SRBEXT srbext)
 {
-////VERIFY(6) seems obsoleted? I didn't see description in Seagate SCSI reference.
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 }
@@ -1623,16 +1372,7 @@ UCHAR Scsi_ModeSelect6(PSPCNVME_SRBEXT srbext)
     PMODE_PARAMETER_HEADER header = (PMODE_PARAMETER_HEADER)buffer;
     PMODE_PARAMETER_BLOCK param_block = (PMODE_PARAMETER_BLOCK)(header+1);
     PUCHAR cursor = ((PUCHAR)param_block + header->BlockDescriptorLength);
-    //ParameterList Layout of ModeSelect is:
-    //[MODE_PARAMETER_HEADER][MODE_PARAMETER_BLOCK][PAGE1][PAGE2][.....]
-    //There are two problem here:
-    //1.PMODE_PARAMETER_BLOCK is optional. Sometimes it is not exist 
-    //  so header->BlockDescriptorLength == 0.
-    //2.header->ModeDataLength IS ALWAYS 0. Don't use it to check following data.
-    //  (refet to Seagate SCSI Command reference. This field is reserved in MODE_SELECT cmd)
-    //  You should use total buffer length to check following data(mode page) blocks.
 
-    //currently don't support VendorSpecific MODE_SELECT op.
     if(0 == select->PFBit)
         return SRB_STATUS_INVALID_REQUEST;
 
@@ -1642,7 +1382,6 @@ UCHAR Scsi_ModeSelect6(PSPCNVME_SRBEXT srbext)
     if(0 == header->BlockDescriptorLength)
         param_block = NULL;
 
-    //windows set header->ModeDataLength to 0. No idea if it is bug or lazy....
     mode_data_size = srbext->DataBufLen() - sizeof(MODE_PARAMETER_HEADER) - header->BlockDescriptorLength;
     offset = 0;
     while(mode_data_size > 0)
@@ -1676,7 +1415,7 @@ UCHAR Scsi_ModeSense6(PSPCNVME_SRBEXT srbext)
     PMODE_PARAMETER_HEADER header = (PMODE_PARAMETER_HEADER)buffer;
     ULONG buf_size = srbext->DataBufLen();
     ULONG ret_size = 0;
-    ULONG page_size = 0;    //this is "copied ModePage size", not OS PAGE_SIZE...
+    ULONG page_size = 0;
 
     if (buf_size < sizeof(MODE_PARAMETER_HEADER) || NULL == buffer)
     {
@@ -1690,7 +1429,6 @@ UCHAR Scsi_ModeSense6(PSPCNVME_SRBEXT srbext)
     buf_size -= sizeof(MODE_PARAMETER_HEADER);
     ret_size += sizeof(MODE_PARAMETER_HEADER);
 
-    // Todo: reply real mode sense data
     switch (cdb->MODE_SENSE.PageCode)
     {
     case MODE_PAGE_CACHING:
@@ -1709,9 +1447,6 @@ UCHAR Scsi_ModeSense6(PSPCNVME_SRBEXT srbext)
     }
     case MODE_PAGE_FAULT_REPORTING:
     {
-        //in HLK, it required "Information Exception Control Page".
-        //But it is renamed to MODE_PAGE_FAULT_REPORTING in Windows Storport ....
-        //refet to https://www.t10.org/ftp/t10/document.94/94-190r3.pdf
         page_size = ReplyModePageInfoExceptionCtrl(buffer, buf_size, ret_size);
         header->ModeDataLength += (UCHAR)page_size;
         srb_status = SRB_STATUS_SUCCESS;
@@ -1721,7 +1456,6 @@ UCHAR Scsi_ModeSense6(PSPCNVME_SRBEXT srbext)
     {
         if (buf_size > 0)
         {
-        //buffer size and buffer will be updated in function.
             page_size = ReplyModePageCaching(srbext->DevExt, buffer, buf_size, ret_size);
             header->ModeDataLength += (UCHAR)page_size;
         }
@@ -1755,10 +1489,10 @@ UCHAR Scsi_TestUnitReady(PSPCNVME_SRBEXT srbext)
     UNREFERENCED_PARAMETER(srbext);
     return SRB_STATUS_INVALID_REQUEST;
 }
-// ===== End ScsiHandler_CDB6.cpp =====
 
-// ===== Begin SrbStatus_Translator.cpp =====
-
+// NVMe Completion Status を Storport/SCSI の SRB_STATUS へ翻訳します。
+// 上位スタックは NVMe の詳細コードを直接理解しないため、意味の近い SRB_STATUS と
+// Sense 情報へ寄せて返します。
 UCHAR NvmeGenericToSrbStatus(NVME_COMMAND_STATUS &status)
 {
     switch(status.SC)
@@ -1817,13 +1551,11 @@ UCHAR NvmeGenericToSrbStatus(NVME_COMMAND_STATUS &status)
 }
 UCHAR NvmeCmdSpecificToSrbStatus(NVME_COMMAND_STATUS &status)
 {
-    //todo: log the status code
     UNREFERENCED_PARAMETER(status);
     return SRB_STATUS_ERROR;
 }
 UCHAR NvmeMediaErrorToSrbStatus(NVME_COMMAND_STATUS &status)
 {
-    //todo: log the status code
     UNREFERENCED_PARAMETER(status);
     return SRB_STATUS_ERROR;
 }
@@ -1831,9 +1563,6 @@ UCHAR NvmeMediaErrorToSrbStatus(NVME_COMMAND_STATUS &status)
 
 #if 0
 
-//
-//  Status Code (SC) of NVME_STATUS_TYPE_GENERIC_COMMAND
-//
 typedef enum {
 
     NVME_STATUS_SUCCESS_COMPLETION = 0x00,
@@ -1879,81 +1608,75 @@ typedef enum {
 
 } NVME_STATUS_GENERIC_COMMAND_CODES;
 
-//
-//  Status Code (SC) of NVME_STATUS_TYPE_COMMAND_SPECIFIC
-//
 typedef enum {
 
-    NVME_STATUS_COMPLETION_QUEUE_INVALID = 0x00,         // Create I/O Submission Queue
-    NVME_STATUS_INVALID_QUEUE_IDENTIFIER = 0x01,         // Create I/O Submission Queue, Create I/O Completion Queue, Delete I/O Completion Queue, Delete I/O Submission Queue
-    NVME_STATUS_MAX_QUEUE_SIZE_EXCEEDED = 0x02,         // Create I/O Submission Queue, Create I/O Completion Queue
-    NVME_STATUS_ABORT_COMMAND_LIMIT_EXCEEDED = 0x03,         // Abort
-    NVME_STATUS_ASYNC_EVENT_REQUEST_LIMIT_EXCEEDED = 0x05,         // Asynchronous Event Request
-    NVME_STATUS_INVALID_FIRMWARE_SLOT = 0x06,         // Firmware Commit
-    NVME_STATUS_INVALID_FIRMWARE_IMAGE = 0x07,         // Firmware Commit
-    NVME_STATUS_INVALID_INTERRUPT_VECTOR = 0x08,         // Create I/O Completion Queue
-    NVME_STATUS_INVALID_LOG_PAGE = 0x09,         // Get Log Page
-    NVME_STATUS_INVALID_FORMAT = 0x0A,         // Format NVM
-    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_CONVENTIONAL_RESET = 0x0B,         // Firmware Commit
-    NVME_STATUS_INVALID_QUEUE_DELETION = 0x0C,         // Delete I/O Completion Queue
-    NVME_STATUS_FEATURE_ID_NOT_SAVEABLE = 0x0D,         // Set Features
-    NVME_STATUS_FEATURE_NOT_CHANGEABLE = 0x0E,         // Set Features
-    NVME_STATUS_FEATURE_NOT_NAMESPACE_SPECIFIC = 0x0F,         // Set Features
-    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_NVM_SUBSYSTEM_RESET = 0x10,         // Firmware Commit
-    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_RESET = 0x11,         // Firmware Commit
-    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_MAX_TIME_VIOLATION = 0x12,         // Firmware Commit
-    NVME_STATUS_FIRMWARE_ACTIVATION_PROHIBITED = 0x13,         // Firmware Commit
-    NVME_STATUS_OVERLAPPING_RANGE = 0x14,         // Firmware Commit, Firmware Image Download, Set Features
+    NVME_STATUS_COMPLETION_QUEUE_INVALID = 0x00,
+    NVME_STATUS_INVALID_QUEUE_IDENTIFIER = 0x01,
+    NVME_STATUS_MAX_QUEUE_SIZE_EXCEEDED = 0x02,
+    NVME_STATUS_ABORT_COMMAND_LIMIT_EXCEEDED = 0x03,
+    NVME_STATUS_ASYNC_EVENT_REQUEST_LIMIT_EXCEEDED = 0x05,
+    NVME_STATUS_INVALID_FIRMWARE_SLOT = 0x06,
+    NVME_STATUS_INVALID_FIRMWARE_IMAGE = 0x07,
+    NVME_STATUS_INVALID_INTERRUPT_VECTOR = 0x08,
+    NVME_STATUS_INVALID_LOG_PAGE = 0x09,
+    NVME_STATUS_INVALID_FORMAT = 0x0A,
+    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_CONVENTIONAL_RESET = 0x0B,
+    NVME_STATUS_INVALID_QUEUE_DELETION = 0x0C,
+    NVME_STATUS_FEATURE_ID_NOT_SAVEABLE = 0x0D,
+    NVME_STATUS_FEATURE_NOT_CHANGEABLE = 0x0E,
+    NVME_STATUS_FEATURE_NOT_NAMESPACE_SPECIFIC = 0x0F,
+    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_NVM_SUBSYSTEM_RESET = 0x10,
+    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_RESET = 0x11,
+    NVME_STATUS_FIRMWARE_ACTIVATION_REQUIRES_MAX_TIME_VIOLATION = 0x12,
+    NVME_STATUS_FIRMWARE_ACTIVATION_PROHIBITED = 0x13,
+    NVME_STATUS_OVERLAPPING_RANGE = 0x14,
 
-    NVME_STATUS_NAMESPACE_INSUFFICIENT_CAPACITY = 0x15,         // Namespace Management
-    NVME_STATUS_NAMESPACE_IDENTIFIER_UNAVAILABLE = 0x16,         // Namespace Management
-    NVME_STATUS_NAMESPACE_ALREADY_ATTACHED = 0x18,         // Namespace Attachment
-    NVME_STATUS_NAMESPACE_IS_PRIVATE = 0x19,         // Namespace Attachment
-    NVME_STATUS_NAMESPACE_NOT_ATTACHED = 0x1A,         // Namespace Attachment
-    NVME_STATUS_NAMESPACE_THIN_PROVISIONING_NOT_SUPPORTED = 0x1B,         // Namespace Management
-    NVME_STATUS_CONTROLLER_LIST_INVALID = 0x1C,         // Namespace Attachment
+    NVME_STATUS_NAMESPACE_INSUFFICIENT_CAPACITY = 0x15,
+    NVME_STATUS_NAMESPACE_IDENTIFIER_UNAVAILABLE = 0x16,
+    NVME_STATUS_NAMESPACE_ALREADY_ATTACHED = 0x18,
+    NVME_STATUS_NAMESPACE_IS_PRIVATE = 0x19,
+    NVME_STATUS_NAMESPACE_NOT_ATTACHED = 0x1A,
+    NVME_STATUS_NAMESPACE_THIN_PROVISIONING_NOT_SUPPORTED = 0x1B,
+    NVME_STATUS_CONTROLLER_LIST_INVALID = 0x1C,
 
-    NVME_STATUS_DEVICE_SELF_TEST_IN_PROGRESS = 0x1D,         // Device Self-test
+    NVME_STATUS_DEVICE_SELF_TEST_IN_PROGRESS = 0x1D,
 
-    NVME_STATUS_BOOT_PARTITION_WRITE_PROHIBITED = 0x1E,         // Firmware Commit
+    NVME_STATUS_BOOT_PARTITION_WRITE_PROHIBITED = 0x1E,
 
-    NVME_STATUS_INVALID_CONTROLLER_IDENTIFIER = 0x1F,         // Virtualization Management
-    NVME_STATUS_INVALID_SECONDARY_CONTROLLER_STATE = 0x20,         // Virtualization Management
-    NVME_STATUS_INVALID_NUMBER_OF_CONTROLLER_RESOURCES = 0x21,         // Virtualization Management
-    NVME_STATUS_INVALID_RESOURCE_IDENTIFIER = 0x22,         // Virtualization Management
+    NVME_STATUS_INVALID_CONTROLLER_IDENTIFIER = 0x1F,
+    NVME_STATUS_INVALID_SECONDARY_CONTROLLER_STATE = 0x20,
+    NVME_STATUS_INVALID_NUMBER_OF_CONTROLLER_RESOURCES = 0x21,
+    NVME_STATUS_INVALID_RESOURCE_IDENTIFIER = 0x22,
 
-    NVME_STATUS_SANITIZE_PROHIBITED_ON_PERSISTENT_MEMORY = 0x23,         // Sanitize
+    NVME_STATUS_SANITIZE_PROHIBITED_ON_PERSISTENT_MEMORY = 0x23,
 
-    NVME_STATUS_INVALID_ANA_GROUP_IDENTIFIER = 0x24,         // Namespace Management
-    NVME_STATUS_ANA_ATTACH_FAILED = 0x25,         // Namespace Attachment
+    NVME_STATUS_INVALID_ANA_GROUP_IDENTIFIER = 0x24,
+    NVME_STATUS_ANA_ATTACH_FAILED = 0x25,
 
-    NVME_IO_COMMAND_SET_NOT_SUPPORTED = 0x29,         // Namespace Attachment/Management
-    NVME_IO_COMMAND_SET_NOT_ENABLED = 0x2A,         // Namespace Attachment
-    NVME_IO_COMMAND_SET_COMBINATION_REJECTED = 0x2B,         // Set Features
-    NVME_IO_COMMAND_SET_INVALID = 0x2C,         // Identify
+    NVME_IO_COMMAND_SET_NOT_SUPPORTED = 0x29,
+    NVME_IO_COMMAND_SET_NOT_ENABLED = 0x2A,
+    NVME_IO_COMMAND_SET_COMBINATION_REJECTED = 0x2B,
+    NVME_IO_COMMAND_SET_INVALID = 0x2C,
 
-    NVME_STATUS_STREAM_RESOURCE_ALLOCATION_FAILED = 0x7F,         // Streams Directive
-    NVME_STATUS_ZONE_INVALID_FORMAT = 0x7F,         // Namespace Management
+    NVME_STATUS_STREAM_RESOURCE_ALLOCATION_FAILED = 0x7F,
+    NVME_STATUS_ZONE_INVALID_FORMAT = 0x7F,
 
-    NVME_STATUS_NVM_CONFLICTING_ATTRIBUTES = 0x80,         // Dataset Management, Read, Write
-    NVME_STATUS_NVM_INVALID_PROTECTION_INFORMATION = 0x81,         // Compare, Read, Write, Write Zeroes
-    NVME_STATUS_NVM_ATTEMPTED_WRITE_TO_READ_ONLY_RANGE = 0x82,         // Dataset Management, Write, Write Uncorrectable, Write Zeroes
-    NVME_STATUS_NVM_COMMAND_SIZE_LIMIT_EXCEEDED = 0x83,         // Dataset Management
+    NVME_STATUS_NVM_CONFLICTING_ATTRIBUTES = 0x80,
+    NVME_STATUS_NVM_INVALID_PROTECTION_INFORMATION = 0x81,
+    NVME_STATUS_NVM_ATTEMPTED_WRITE_TO_READ_ONLY_RANGE = 0x82,
+    NVME_STATUS_NVM_COMMAND_SIZE_LIMIT_EXCEEDED = 0x83,
 
-    NVME_STATUS_ZONE_BOUNDARY_ERROR = 0xB8,         // Compare, Read, Verify, Write, Write Uncorrectable, Write Zeroes, Copy, Zone Append
-    NVME_STATUS_ZONE_FULL = 0xB9,         // Write, Write Uncorrectable, Write Zeroes, Copy, Zone Append
-    NVME_STATUS_ZONE_READ_ONLY = 0xBA,         // Write, Write Uncorrectable, Write Zeroes, Copy, Zone Append
-    NVME_STATUS_ZONE_OFFLINE = 0xBB,         // Compare, Read, Verify, Write, Write Uncorrectable, Write Zeroes, Copy, Zone Append
-    NVME_STATUS_ZONE_INVALID_WRITE = 0xBC,         // Write, Write Uncorrectable, Write Zeroes, Copy
-    NVME_STATUS_ZONE_TOO_MANY_ACTIVE = 0xBD,         // Write, Write Uncorrectable, Write Zeroes, Copy, Zone Append, Zone Management Send
-    NVME_STATUS_ZONE_TOO_MANY_OPEN = 0xBE,         // Write, Write Uncorrectable, Write Zeroes, Copy, Zone Append, Zone Management Send
-    NVME_STATUS_ZONE_INVALID_STATE_TRANSITION = 0xBF,         // Zone Management Send
+    NVME_STATUS_ZONE_BOUNDARY_ERROR = 0xB8,
+    NVME_STATUS_ZONE_FULL = 0xB9,
+    NVME_STATUS_ZONE_READ_ONLY = 0xBA,
+    NVME_STATUS_ZONE_OFFLINE = 0xBB,
+    NVME_STATUS_ZONE_INVALID_WRITE = 0xBC,
+    NVME_STATUS_ZONE_TOO_MANY_ACTIVE = 0xBD,
+    NVME_STATUS_ZONE_TOO_MANY_OPEN = 0xBE,
+    NVME_STATUS_ZONE_INVALID_STATE_TRANSITION = 0xBF,
 
 } NVME_STATUS_COMMAND_SPECIFIC_CODES;
 
-//
-//  Status Code (SC) of NVME_STATUS_TYPE_MEDIA_ERROR
-//
 typedef enum {
 
     NVME_STATUS_NVM_WRITE_FAULT = 0x80,
@@ -1969,14 +1692,12 @@ typedef enum {
 
 #endif
 
-// ===== End SrbStatus_Translator.cpp =====
 
-// ===== Begin Srb_Utils.cpp =====
-
+// SRB_STATUS と SCSI Sense Data の補助処理です。
+// エラー時に単に SRB_STATUS_ERROR を返すだけでは原因が伝わりにくいため、
+// 必要に応じて Sense Key/ASC/ASCQ を補います。
 UCHAR NvmeToSrbStatus(NVME_COMMAND_STATUS& status)
 {
-//this is most frequently passed condition, so pull it up here.
-//It make common route won't consume callstack too deep.
     if(0 == (status.SCT & status.SC))
         return SRB_STATUS_SUCCESS;
 
@@ -1993,19 +1714,16 @@ UCHAR NvmeToSrbStatus(NVME_COMMAND_STATUS& status)
 }
 void SetScsiSenseBySrbStatus(PSTORAGE_REQUEST_BLOCK srb, UCHAR &status)
 {
-//don't set ScsiStatus for other SRB_STATUS_xxx .
-//Only SRB_STATUS_ERROR need it.
     switch (status)
     {
         case SRB_STATUS_SUCCESS:
             SrbSetScsiStatus(srb, SCSISTAT_GOOD);
             break;
-        case SRB_STATUS_BUSY:   //SRB_STATUS_BUSY will check SCSISTAT....
+        case SRB_STATUS_BUSY:
             SrbSetScsiStatus(srb, SCSISTAT_BUSY);
             break;
         case SRB_STATUS_ERROR:
         {
-            //If SRB_STATUS_ERROR go with wrong ScsiStatus, storport could treat it as SRB_STATUS_SUCCESS.
 
             PSENSE_DATA sdata = (PSENSE_DATA)SrbGetSenseInfoBuffer(srb);
             UCHAR sdata_size = SrbGetSenseInfoBufferLength(srb);
@@ -2030,10 +1748,10 @@ void SetScsiSenseBySrbStatus(PSTORAGE_REQUEST_BLOCK srb, UCHAR &status)
     }
 }
 
-// ===== End Srb_Utils.cpp =====
 
-// ===== Begin DriverEntry.cpp =====
-
+// Windows がドライバをロードしたときの入口です。
+// HW_INITIALIZATION_DATA に Storport ミニポートのコールバックと拡張領域サイズを設定し、
+// StorPortInitialize で OS のストレージスタックへ登録します。
 EXTERN_C_START
 sp_DRIVER_INITIALIZE DriverEntry;
 ULONG DriverEntry(IN PVOID DrvObj, IN PVOID RegPath)
@@ -2045,28 +1763,20 @@ ULONG DriverEntry(IN PVOID DrvObj, IN PVOID RegPath)
     HW_INITIALIZATION_DATA init_data = { 0 };
     ULONG status = 0;
 
-    // Set size of hardware initialization structure.
     init_data.HwInitializationDataSize = sizeof(HW_INITIALIZATION_DATA);
 
-    // Identify required miniport entry point routines.
     init_data.HwInitialize = HwInitialize;
     init_data.HwBuildIo = HwBuildIo;
     init_data.HwStartIo = HwStartIo;
-    init_data.HwFindAdapter = HwFindAdapter;        //AddDevice() + IRP_MJ_PNP +  IRP_MN_READ_CONFIG
+    init_data.HwFindAdapter = HwFindAdapter;
     init_data.HwResetBus = HwResetBus;
     init_data.HwAdapterControl = HwAdapterControl;
-    //init_data.HwUnitControl = HwUnitControl;
     init_data.HwTracingEnabled = HwTracingEnabled;
     init_data.HwCleanupTracing = HwCleanupTracing;
 
-    //IRP_MJ_DEVICE_CONTROL + IOCTL code == IOCTL_MINIPORT_PROCESS_SERVICE_IRP
-    //to prevent IOCTL request in DPC_LEVEL, define another IOCTL to make sure it is processed in PASSIVE.
-    //so define this IOCTL_MINIPORT_PROCESS_SERVICE_IRP
     init_data.HwProcessServiceRequest = HwProcessServiceRequest;
-    //complete NOT FINISHED IRP received in HwProcessServiceRequest. it called when device removed
     init_data.HwCompleteServiceIrp = HwCompleteServiceIrp;
 
-    // Specifiy adapter specific information.
     init_data.AutoRequestSense = TRUE;
     init_data.NeedPhysicalAddresses = TRUE;
     init_data.AdapterInterfaceType = PCIBus;
@@ -2074,43 +1784,32 @@ ULONG DriverEntry(IN PVOID DrvObj, IN PVOID RegPath)
     init_data.TaggedQueuing = TRUE;
     init_data.MultipleRequestPerLu = TRUE;
     init_data.NumberOfAccessRanges = 2;
-    // Specify support/use SRB Extension for Windows 8 and up
     init_data.SrbTypeFlags = SRB_TYPE_FLAG_STORAGE_REQUEST_BLOCK;
     
-    //stornvme uses these features:
-    //  STOR_FEATURE_DUMP_INFO
-    //  STOR_FEATURE_ADAPTER_CONTROL_PRE_FINDADAPTER
-    //  STOR_FEATURE_EXTRA_IO_INFORMATION
-    //  STOR_FEATURE_DUMP_RESUME_CAPABLE
-    //  STOR_FEATURE_DEVICE_NAME_NO_SUFFIX
-    //  STOR_FEATURE_DUMP_POINTERS
     init_data.FeatureSupport = STOR_FEATURE_FULL_PNP_DEVICE_CAPABILITIES /* | STOR_FEATURE_NVME*/;
 
     /* Set required extension sizes. */
     init_data.DeviceExtensionSize = sizeof(CNvmeDevice);
     init_data.SrbExtensionSize = sizeof(SPCNVME_SRBEXT);
 
-    // Call StorPortInitialize to register with HwInitData
     status = StorPortInitialize(DrvObj, RegPath, &init_data, NULL);
 
     return status;
 }
 EXTERN_C_END
-// ===== End DriverEntry.cpp =====
 
-// ===== Begin MiniportFunctions.cpp =====
-
+// Storport から直接呼ばれるミニポートコールバック群です。
+// アダプタ検出、初期化、I/O 受付、リセット、PnP/電源制御、トレースなど、
+// ドライバの外向きの振る舞いはこのセクションが中心です。
 static void FillPortConfiguration(PPORT_CONFIGURATION_INFORMATION portcfg, CNvmeDevice* nvme)
 {
-//Because MaxTxSize and MaxTxPages should be calculated by nvme->CtrlCap and nvme->CtrlIdent,
-//So FillPortConfiguration() should be called AFTER nvme->IdentifyController()
     portcfg->MaximumTransferLength = nvme->MaxTxSize;
     portcfg->NumberOfPhysicalBreaks = nvme->MaxTxPages;
-    portcfg->AlignmentMask = FILE_LONG_ALIGNMENT;    //PRP 1 need align DWORD in some case. So set this align is better.
+    portcfg->AlignmentMask = FILE_LONG_ALIGNMENT;
     portcfg->MiniportDumpData = NULL;
     portcfg->InitiatorBusId[0] = 1;
     portcfg->CachesData = FALSE;
-    portcfg->MapBuffers = STOR_MAP_ALL_BUFFERS_INCLUDING_READ_WRITE; //specify bounce buffer type?
+    portcfg->MapBuffers = STOR_MAP_ALL_BUFFERS_INCLUDING_READ_WRITE;
     portcfg->MaximumNumberOfTargets = NVME_CONST::MAX_TARGETS;
     portcfg->SrbType = SRB_TYPE_STORAGE_REQUEST_BLOCK;
     portcfg->DeviceExtensionSize = sizeof(CNvmeDevice);
@@ -2123,17 +1822,14 @@ static void FillPortConfiguration(PPORT_CONFIGURATION_INFORMATION portcfg, CNvme
     portcfg->ScatterGather = TRUE;
     portcfg->Master = TRUE;
     portcfg->AddressType = STORAGE_ADDRESS_TYPE_BTL8;
-    portcfg->Dma64BitAddresses = SCSI_DMA64_MINIPORT_FULL64BIT_SUPPORTED;   //should set this value if MaxNumberOfIO > 1000.
+    portcfg->Dma64BitAddresses = SCSI_DMA64_MINIPORT_FULL64BIT_SUPPORTED;
     portcfg->MaxNumberOfIO = NVME_CONST::MAX_IO_PER_LU * NVME_CONST::MAX_LU;
     portcfg->MaxIOsPerLun = NVME_CONST::MAX_IO_PER_LU;
 
-    //this will limit LUN i/o queue and affect HBA Gateway OutstandingMax.
-    //stornvme call StorPortSetDeviceQueueDepth() to adjust it dynamically.
     portcfg->InitialLunQueueDepth = NVME_CONST::MAX_IO_PER_LU;
 
-    //Dump is not supported now. Will be supported in future.
     portcfg->RequestedDumpBufferSize = 0;
-    portcfg->DumpMode = 0;//DUMP_MODE_CRASH;
+    portcfg->DumpMode = 0;
     portcfg->DumpRegion.VirtualBase = NULL;
     portcfg->DumpRegion.PhysicalBase.QuadPart = NULL;
     portcfg->DumpRegion.Length = 0;
@@ -2148,8 +1844,6 @@ _Use_decl_annotations_ ULONG HwFindAdapter(
     _Inout_ PPORT_CONFIGURATION_INFORMATION port_cfg,
     _In_ PBOOLEAN Reserved3)
 {
-    //Running at PASSIVE_LEVEL!!!!!!!!!
-
     CDebugCallInOut inout(__FUNCTION__);
     UNREFERENCED_PARAMETER(ctx);
     UNREFERENCED_PARAMETER(businfo);
@@ -2167,32 +1861,21 @@ _Use_decl_annotations_ ULONG HwFindAdapter(
     if (!NT_SUCCESS(status))
         goto error;
 
-    //Todo: supports multiple controller of NVMe v2.0  
     status = nvme->IdentifyController(NULL, &nvme->CtrlIdent, true);
     if (!NT_SUCCESS(status))
         goto error;
     
-    //PCI bus related initialize
-    //this should be called AFTER InitController() , because 
-    //we need identify controller to know MaxTxSize.
     FillPortConfiguration(port_cfg, nvme);
 
     return SP_RETURN_FOUND;
 
 error:
-//any return code which is not SP_RETURN_FOUND causes driver installation hanging?
-//I don't know why so fail this driver later....
     nvme->Teardown();
-    //SP_RETURN_NOT_FOUND will cause driver installation hanging...?
     return SP_RETURN_ERROR;
 }
 
 _Use_decl_annotations_ BOOLEAN HwInitialize(PVOID devext)
 {
-//Running at DIRQL
-    //in stornvme, it checks PPORT_CONFIGURATION_INFORMATION::DumpMode.
-    //If (DumpMode != 0) , stornvme will do all Initialize here....
-    //Todo: crack stornvme to know why it can do init here. This is called in DIRQL.
 
     CDebugCallInOut inout(__FUNCTION__);
     CNvmeDevice* nvme = (CNvmeDevice*)devext;
@@ -2208,7 +1891,6 @@ _Use_decl_annotations_ BOOLEAN HwInitialize(PVOID devext)
 _Use_decl_annotations_
 BOOLEAN HwPassiveInitialize(PVOID devext)
 {
-    //Running at PASSIVE_LEVEL
     CDebugCallInOut inout(__FUNCTION__);
     CNvmeDevice* nvme = (CNvmeDevice*)devext;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -2226,7 +1908,6 @@ BOOLEAN HwPassiveInitialize(PVOID devext)
     if (!NT_SUCCESS(status))
         return FALSE;
 
-    //CreateIoQueues should be called AFTER IdentifyController.
     status = nvme->CreateIoQueues();
     if (!NT_SUCCESS(status))
         return FALSE;
@@ -2242,33 +1923,18 @@ BOOLEAN HwPassiveInitialize(PVOID devext)
 _Use_decl_annotations_
 BOOLEAN HwBuildIo(_In_ PVOID devext,_In_ PSCSI_REQUEST_BLOCK srb)
 {
-//BuildIo() callback is used to perform "resource preparing" and "jobs DON'T NEED lock".
-//In this callback, also dispatch some behavior which need be handled very fast.
-//some event (e.g. REMOVE_DEVICE and POWER_EVENTS) only fire once and need to be handled quickly.
-//We can't dispatch such events to StartIo(), that could waste too much time.
     PSPCNVME_SRBEXT srbext = SPCNVME_SRBEXT::InitSrbExt(devext, (PSTORAGE_REQUEST_BLOCK)srb);
     BOOLEAN need_startio = FALSE;
 
     switch (srbext->FuncCode())
     {
     case SRB_FUNCTION_ABORT_COMMAND:
-    case SRB_FUNCTION_RESET_LOGICAL_UNIT: //handled by HwUnitControl?
+    case SRB_FUNCTION_RESET_LOGICAL_UNIT:
     case SRB_FUNCTION_RESET_DEVICE:
-        //skip these request currently. I didn't get any idea yet to handle them.
     case SRB_FUNCTION_RESET_BUS:
-    //MSDN said : 
-    //  it is possible for the HwScsiStartIo routine to be called 
-    //  with an SRB in which the Function member is set to SRB_FUNCTION_RESET_BUS 
-    //  if a NT-based operating system storage class driver requests this operation. 
-    //  The HwScsiStartIo routine can simply call the HwScsiResetBus routine 
-    //  to satisfy an incoming bus-reset request.
-    //  I don't understand the difference.... 
-    //  Current Windows family are already all NT-based system :p
-        //SrbSetSrbStatus(srb, SRB_STATUS_INVALID_REQUEST);
 		srbext->CompleteSrb(SRB_STATUS_INVALID_REQUEST);
         need_startio = FALSE;
         break;
-    //case SRB_FUNCTION_WMI:
 
     case SRB_FUNCTION_POWER:
         need_startio = BuildIo_SrbPowerHandler(srbext);
@@ -2277,11 +1943,9 @@ BOOLEAN HwBuildIo(_In_ PVOID devext,_In_ PSCSI_REQUEST_BLOCK srb)
         need_startio = BuildIo_ScsiHandler(srbext);
         break;
     case SRB_FUNCTION_IO_CONTROL:
-        //should check signature to determine incoming IOCTL
         need_startio = BuildIo_IoctlHandler(srbext);
         break;
     case SRB_FUNCTION_PNP:
-        //should handle PNP remove adapter
         need_startio = BuildIo_SrbPnpHandler(srbext);
         break;
 	default:
@@ -2295,41 +1959,26 @@ BOOLEAN HwBuildIo(_In_ PVOID devext,_In_ PSCSI_REQUEST_BLOCK srb)
 _Use_decl_annotations_
 BOOLEAN HwStartIo(PVOID devext, PSCSI_REQUEST_BLOCK srb)
 {
-    UNREFERENCED_PARAMETER(devext);
     PSPCNVME_SRBEXT srbext = SPCNVME_SRBEXT::GetSrbExt((PSTORAGE_REQUEST_BLOCK)srb);
     UCHAR srb_status = SRB_STATUS_ERROR;
 
     switch (srbext->FuncCode())
     {
-    //case SRB_FUNCTION_RESET_LOGICAL_UNIT:     //dispatched in HwUnitControl
-    //case SRB_FUNCTION_RESET_DEVICE:           //dispatched in HwAdapterControl
-    //case SRB_FUNCTION_RESET_BUS:              //dispatched in HwResetBus
-    //case SRB_FUNCTION_POWER:                  //dispatched in HwBuildIo
-    //case SRB_FUNCTION_ABORT_COMMAND:          //should I support abort of async I/O?
-    //case SRB_FUNCTION_WMI:                    //TODO: do it later....
-    //    srb_status = DefaultCmdHandler(srb, srbext);
-    //    break;
     case SRB_FUNCTION_EXECUTE_SCSI:
         srb_status = StartIo_ScsiHandler(srbext);
         break;
     case SRB_FUNCTION_IO_CONTROL:
         srb_status = StartIo_IoctlHandler(srbext);
         break;
-    //case SRB_FUNCTION_PNP:
-        //pnp handlers
-        //scsi handlers
     default:
         srb_status = StartIo_DefaultHandler(srbext);
         break;
 
     }
 
-    //todo: handle SCSI status for SRB
     if (srb_status != SRB_STATUS_PENDING)
         srbext->CompleteSrb(srb_status);
 
-    //return TRUE indicates that "this driver handled this request, 
-    //no matter succeed or fail..."
     return TRUE;
 }
 
@@ -2339,10 +1988,7 @@ BOOLEAN HwResetBus(
     ULONG PathId
 )
 {
-    CDebugCallInOut inout(__FUNCTION__);
     UNREFERENCED_PARAMETER(PathId);
-    //miniport driver is responsible for completing SRBs received by HwStorStartIo for 
-    //PathId during this routine and setting their status to SRB_STATUS_BUS_RESET if necessary.
     CNvmeDevice* nvme = (CNvmeDevice*)DeviceExtension;
     DbgBreakPoint();
     nvme->ResetOutstandingCmds();
@@ -2371,50 +2017,30 @@ SCSI_ADAPTER_CONTROL_STATUS HwAdapterControl(
     }
     case ScsiStopAdapter:
     {
-    //Device "entering" D1 / D2 / D3 from D0
-    //**running at DIRQL
-        //this is post event of DeviceRemove. 
-        //In normal procedure of removing device, we don't have to do anything here.
-        //BuildIo SRB_FUNCTION_PNP should handle DEVICE_REMOVE teardown.
-        //ScsiStopAdapter is just a power state handler, we have no idea that
-        //"is this call from a device remove? or sleep? or hibernation? or power down?"
         status = ScsiAdapterControlSuccess;
         break;
     }
     case ScsiRestartAdapter:
     {
-    //Device "entering" D0 state from D1 D2 D3 state
-    //This control code do similar things(exclude PerfConfig) as HwInitialize().
-    //**running at DIRQL
         status = Handle_RestartAdapter(nvme);
         break;
     }
     case ScsiAdapterSurpriseRemoval:
     {
-    //**running < DISPATCH_LEVEL
-    //Device is surprise removed.
-    //**Will SRB_PNP_xxx still be fired if this control code supported/implemented?
-    //***SurpriseRemove don't need unregister queues. Only need to delete queues.
         nvme->Teardown();
         status = ScsiAdapterControlSuccess;
         break;
     }
-    //Valid since Win8. If this control enabled, storport will notify 
-    //miniport when power plan changed.
     case ScsiPowerSettingNotification:
     {
-     //**running at PASSIVE_LEVEL
         STOR_POWER_SETTING_INFO* info = (STOR_POWER_SETTING_INFO*) Parameters;
         UNREFERENCED_PARAMETER(info);
         status = ScsiAdapterControlSuccess;
         break;
     }
 
-    //Valid since Win8. If this control enabled, miniport won't receive
-    //SRB_FUNCTION_POWER in BuildIo and no ScsiStopAdapter in AdapterControl
     case ScsiAdapterPower:
     {
-     //**running <= DISPATCH_LEVEL
       STOR_ADAPTER_CONTROL_POWER *power = (STOR_ADAPTER_CONTROL_POWER *)Parameters;
       UNREFERENCED_PARAMETER(power);
       status = ScsiAdapterControlSuccess;
@@ -2422,28 +2048,7 @@ SCSI_ADAPTER_CONTROL_STATUS HwAdapterControl(
     }
 
 #pragma region === Some explain of un-implemented control codes ===
-    //If STOR_FEATURE_ADAPTER_CONTROL_PRE_FINDADAPTER is set in HW_INITIALIZATION_DATA of DriverEntry,
-    // storport will fire this control code when handling IRP_MN_FILTER_RESOURCE_REQUIREMENTS.
-    // **In this control code, DeviceExtension is STILL NOT initialized because HwFindAdapter not called yet.
-    //case ScsiAdapterFilterResourceRequirements:
-    //{
-    //  //**running < DISPATCH_LEVEL
-    //  STOR_FILTER_RESOURCE_REQUIREMENTS* filter = (STOR_FILTER_RESOURCE_REQUIREMENTS*)Parameters;
-    //    break;
-    //}
 
-    //storport call this control code before  ScsiRestartAdapter.
-    // interrupt is NOT connected yet here.
-    // If HBA need restore config and resource via StorPortGetBusData() 
-    // or StorPortSetBusDataByOffset(), we should implement this control code.
-    // ** this means if you need re-touch PCIe resource and reconfig 
-    //    runtime config(remap io space...etc), you'll need this control code.
-    //case ScsiSetRunningConfig:
-    //{
-    //     //**running at PASSIVE_LEVEL
-    //    //status = HandleScsiSetRunningConfig();
-    //    break;
-    //}
 #pragma endregion
 
     default:
@@ -2458,19 +2063,10 @@ void HwProcessServiceRequest(
     PVOID Irp
 )
 {
-    //If there are DeviceIoControl use IOCTL_MINIPORT_PROCESS_SERVICE_IRP, 
-    //we should implement this callback.
     
     CDebugCallInOut inout(__FUNCTION__);
     UNREFERENCED_PARAMETER(DeviceExtension);
     PIRP irp = (PIRP) Irp;
-    //UNREFERENCED_PARAMETER(Irp);
-    ////ioctl interface for miniport
-    //PSMOKY_EXT devext = (PSMOKY_EXT)DeviceExtension;
-    //PIRP irp = (PIRP)Irp;
-    //irp->IoStatus.Information = 0;
-    //irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
-    //StorPortCompleteServiceIrp(devext, irp);
 
     irp->IoStatus.Information = 0;
     irp->IoStatus.Status = STATUS_SUCCESS;
@@ -2480,18 +2076,10 @@ void HwProcessServiceRequest(
 _Use_decl_annotations_
 void HwCompleteServiceIrp(PVOID DeviceExtension)
 {
-    //If HwProcessServiceRequest()is implemented, this HwCompleteServiceIrp 
-    // wiill be called before stop to retrieve any new IOCTL_MINIPORT_PROCESS_SERVICE_IRP requests.
-    //This callback give us a chance to cleanup requests.
 
-    //example: if IOCTL_MINIPORT_PROCESS_SERVICE_IRP handler send IRP to 
-    //          another device and waiting result, we should cancel waiting 
-    //          and cleanup that IRP in this callback.
 
     CDebugCallInOut inout(__FUNCTION__);
     UNREFERENCED_PARAMETER(DeviceExtension);
-    //if any async request in HwProcessServiceRequest, 
-    //we should complete them here and let them go back asap.
 }
 
 _Use_decl_annotations_
@@ -2505,19 +2093,8 @@ SCSI_UNIT_CONTROL_STATUS HwUnitControl(
     UNREFERENCED_PARAMETER(ControlType);
     UNREFERENCED_PARAMETER(Parameters);
 
-    //UnitControl is very similar as AdapterControl.
-    //First call will query "ScsiQuerySupportedControlTypes", then 
-    //miniport need fill corresponding element to report.
 
-    //ScsiUnitStart => a unit is starting up (disk spin up?)
-    //ScsiUnitPower => unit power on or off, [Parameters] arg is STOR_UNIT_CONTROL_POWER*
-    //ScsiUnitRemove => DeviceRemove post event of Unit
-    //ScsiUnitSurpriseRemoval => SurpriseRemoved event of Unit
     
-    //UnitControl should handle events of LU:
-    //1.Power States
-    //2.Device Start
-    //3.Device Remove and Surprise Remove
     return ScsiUnitControlSuccess;
 }
 
@@ -2530,8 +2107,6 @@ VOID HwTracingEnabled(
     UNREFERENCED_PARAMETER(HwDeviceExtension);
     UNREFERENCED_PARAMETER(Enabled);
 
-    //miniport should write its own ETW log via StorPortEtwEventXXX API (refer to storport.h)
-    // So HwTracingEnabled and HwCleanupTracing are used to "turn on" and "turn off" its own ETW logging mechanism.
 }
 
 _Use_decl_annotations_
@@ -2541,10 +2116,10 @@ VOID HwCleanupTracing(
 {
     UNREFERENCED_PARAMETER(Arg1);
 }
-// ===== End MiniportFunctions.cpp =====
 
-// ===== Begin NvmeDevice.cpp =====
-
+// NVMe コントローラを表す CNvmeDevice の実装です。
+// PCI BAR のマップ、レジスタアクセス、Admin Queue/IO Queue の作成、Identify、
+// Feature 設定、リセット、シャットダウンまでを管理します。
 BOOLEAN CNvmeDevice::NvmeMsixISR(IN PVOID devext, IN ULONG msgid)
 {
     CNvmeDevice* nvme = (CNvmeDevice*)devext;
@@ -2571,10 +2146,6 @@ void CNvmeDevice::RestartAdapterDpc(
     if(!nvme->IsWorking())
         return;
 
-    //todo: log error
-    //STOR_STATUS_BUSY : already queued this workitem.
-    //STOR_STATUS_INVALID_DEVICE_STATE : device is removing.
-    //STOR_STATUS_INVALID_IRQL: IRQL > DISPATCH_LEVEL
     StorPortInitializeWorker(nvme, &nvme->RestartWorker);
     stor_status = StorPortQueueWorkItem(DevExt, CNvmeDevice::RestartAdapterWorker, nvme->RestartWorker, NULL);
     ASSERT(stor_status == STOR_STATUS_SUCCESS);
@@ -2589,19 +2160,14 @@ void CNvmeDevice::RestartAdapterWorker(
 
     CNvmeDevice* nvme = (CNvmeDevice*)DevExt;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
-    //ULONG stor_status = STOR_STATUS_SUCCESS;
     if (!nvme->IsWorking())
         return;
 
-    //In InitController, DisableController and EnableController could call 
-    //StorPortStallExecution(). It could cause system lag if called in DIRQL.
-    //So I move InitController() here...
     status = nvme->InitNvmeStage1();
     ASSERT(NT_SUCCESS(status));
 
     status = nvme->InitNvmeStage2();
     ASSERT(NT_SUCCESS(status));
-    //resume adapter AFTER restart controller done.
     StorPortResume(DevExt);
     StorPortFreeWorker(nvme, &nvme->RestartWorker);
     nvme->RestartWorker = NULL;
@@ -2747,8 +2313,6 @@ NTSTATUS CNvmeDevice::Setup(PPORT_CONFIGURATION_INFORMATION pci)
     GetPciBusData(pci->AdapterInterfaceType, pci->SystemIoBusNumber, pci->SlotNumber);
     PortCfg = pci;
 
-    //todo: handle NUMA nodes for each queue
-    //KeQueryLogicalProcessorRelationship(&ProcNum, RelationNumaNode, &ProcInfo, &ProcInfoSize);
     AccessRangeCount = min(ACCESS_RANGE_COUNT, PortCfg->NumberOfAccessRanges);
     RtlCopyMemory(AccessRanges, PortCfg->AccessRanges, 
             sizeof(ACCESS_RANGE) * AccessRangeCount);
@@ -2776,17 +2340,12 @@ void CNvmeDevice::Teardown()
 }
 NTSTATUS CNvmeDevice::EnableController()
 {
-    if (IsControllerReady())
         return STATUS_SUCCESS;
 
-    //if set CC.EN = 1 WHEN CSTS.RDY == 1 and CC.EN == 0, it is undefined behavior.
-    //we should wait controller state changing until (CC.EN == 0 and CSTS.RDY == 0).
     bool ok = WaitForCtrlerState(DeviceTimeout, FALSE, FALSE);
     if (!ok)
         return STATUS_INVALID_DEVICE_STATE;
 
-    //before Enable, update these basic information to controller.
-    //these fields only can be modified when CC.EN == 0. (plz refer to nvme 1.3 spec)
     NVME_CONTROLLER_CONFIGURATION cc = { 0 };
     cc.CSS = NVME_CSS_NVM_COMMAND_SET;
     cc.AMS = NVME_AMS_ROUND_ROBIN;
@@ -2796,7 +2355,6 @@ NTSTATUS CNvmeDevice::EnableController()
     cc.EN = 0;
     WriteNvmeRegister(cc);
 
-    //take a break let controller have enough time to retrieve CC values.
     StorPortStallExecution(StallDelay);
 
     cc.EN = 1;
@@ -2810,26 +2368,19 @@ NTSTATUS CNvmeDevice::EnableController()
 }
 NTSTATUS CNvmeDevice::DisableController()
 {
-    //if (!IsWorking())
-    //    return STATUS_INVALID_DEVICE_STATE;
 
     if(!IsControllerReady())
         return STATUS_SUCCESS;
 
-    //if set CC.EN = 1 WHEN CSTS.RDY == 1 and CC.EN == 0, it is undefined behavior.
-    //we should wait controller state changing until (CC.EN == 0 and CSTS.RDY == 0).
     bool ok = WaitForCtrlerState(DeviceTimeout, TRUE, TRUE);
     if (!ok)
         return STATUS_INVALID_DEVICE_STATE;
 
-    //before Enable, update these basic information to controller.
-    //these fields only can be modified when CC.EN == 0. (plz refer to nvme 1.3 spec)
     NVME_CONTROLLER_CONFIGURATION cc = { 0 };
     ReadNvmeRegister(cc);
     cc.EN = 0;
     WriteNvmeRegister(cc);
 
-    //take a break let controller have enough time to retrieve CC values.
     StorPortStallExecution(StallDelay);
     ok = WaitForCtrlerState(DeviceTimeout, FALSE);
 
@@ -2838,12 +2389,6 @@ NTSTATUS CNvmeDevice::DisableController()
     return STATUS_SUCCESS;
 }
 
-//refet to NVME 1.3 , chapter 3.1
-//This function set CC.SHN and wait CSTS.SHST==2.
-//If called this function then you want to do anything(e.g. submit cmd), you should do
-//DisableController()->EnableController. 
-//Note : (In NVMe 1.3 spec) If CC.SHN shutdown progress issued then didn't do restart controler, 
-//       all following behavior (e.g. submit new cmd) are UNDEFINED BEHAVIOR.
 NTSTATUS CNvmeDevice::ShutdownController()
 {
     if (!IsStop() && !IsWorking())
@@ -2851,9 +2396,6 @@ NTSTATUS CNvmeDevice::ShutdownController()
 
     State = NVME_STATE::SHUTDOWN;
     NVME_CONTROLLER_CONFIGURATION cc = { 0 };
-    //NTSTATUS status = STATUS_SUCCESS;
-    //if set CC.EN = 0 WHEN CSTS.RDY == 0 and CC.EN == 1, it is undefined behavior.
-    //we should wait controller state changing until (CC.EN == 1 and CSTS.RDY == 1).
     bool ok = WaitForCtrlerState(DeviceTimeout, TRUE, TRUE);
     if (!ok)
         goto ERROR_BSOD;
@@ -2862,10 +2404,7 @@ NTSTATUS CNvmeDevice::ShutdownController()
     cc.SHN = NVME_CC_SHN_NORMAL_SHUTDOWN;
     WriteNvmeRegister(cc);
 
-    //VMware NVMe 1.0 not guarantee CSTS.SHST will response?
     ok = WaitForCtrlerShst(DeviceTimeout);
-    //if (!ok)
-    //    goto ERROR_BSOD;
 
     return DisableController();
 
@@ -2877,13 +2416,11 @@ ERROR_BSOD:
 }
 NTSTATUS CNvmeDevice::InitController()
 {
-    if (!IsWorking())
         return STATUS_INVALID_DEVICE_STATE;
 
     NTSTATUS status = STATUS_SUCCESS;
     status = DisableController();
     
-    //Disable NVMe Contoller will unregister all I/O queues automatically.
     RegisteredIoQ = 0;
 
     if(!NT_SUCCESS(status))
@@ -2898,7 +2435,6 @@ NTSTATUS CNvmeDevice::InitNvmeStage1()
 {
     NTSTATUS status = STATUS_SUCCESS;
 
-    //Todo: supports multiple controller of NVMe v2.0  
     status = IdentifyController(NULL, &this->CtrlIdent);
     if (!NT_SUCCESS(status))
         return status;
@@ -2916,7 +2452,6 @@ NTSTATUS CNvmeDevice::InitNvmeStage1()
 NTSTATUS CNvmeDevice::InitNvmeStage2()
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
-    //todo: add HostBuffer and AsyncEvent supports
     status = SetInterruptCoalescing();
     if (!NT_SUCCESS(status))
         return status;
@@ -2934,19 +2469,12 @@ NTSTATUS CNvmeDevice::InitNvmeStage2()
 }
 NTSTATUS CNvmeDevice::RestartController()
 {
-//***Running at DIRQL, called by HwAdapterControl
     BOOLEAN ok = FALSE;
     if (!IsWorking())
         return STATUS_INVALID_DEVICE_STATE;
 
-    //stop handling any request BEFORE restart HBA done.
     StorPortPause(this, MAXULONG);
 
-    //[workaround]
-    //StorPortQueueWorkItem() only can be called at IRQL <= DISPATCH_LEVEL.
-    //And 
-    //CNvmeDevice::RegisterIoQueue() should be called at IRQL < DISPATCH_LEVEL.
-    //So I have to call DPC to do StorPortQueueWorkItem().
     ok = StorPortIssueDpc(this, &this->RestartDpc, NULL, NULL);
     ASSERT(ok);
     return STATUS_SUCCESS;
@@ -2960,7 +2488,6 @@ NTSTATUS CNvmeDevice::IdentifyAllNamespaces()
     if(!NT_SUCCESS(status))
         return status;
 
-    //query ns one by one. NS ID is 1 based index
     ULONG *nsid_list = idlist;
     this->NamespaceCount = min(ret_count, NVME_CONST::SUPPORT_NAMESPACES);
     for (ULONG i = 0; i < NamespaceCount; i++)
@@ -2998,7 +2525,6 @@ NTSTATUS CNvmeDevice::CreateIoQueues(bool force)
 }
 NTSTATUS CNvmeDevice::IdentifyController(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_CONTROLLER_DATA ident, bool poll)
 {
-    if (!IsWorking())
         return STATUS_INVALID_DEVICE_STATE;
 
     CAutoPtr<SPCNVME_SRBEXT, NonPagedPool, DEV_POOL_TAG> srbext_ptr;
@@ -3015,7 +2541,6 @@ NTSTATUS CNvmeDevice::IdentifyController(PSPCNVME_SRBEXT srbext, PNVME_IDENTIFY_
     BuildCmd_IdentCtrler(my_srbext, ident);
     status = SubmitAdmCmd(my_srbext, &my_srbext->NvmeCmd);
     
-    //if(poll == true) means this request comes from StartIo
     if(!NT_SUCCESS(status))
         goto END;
 
@@ -3053,10 +2578,8 @@ NTSTATUS CNvmeDevice::IdentifyNamespace(PSPCNVME_SRBEXT srbext, ULONG nsid, PNVM
         my_srbext = srbext_ptr.Get();
     }
 
-    //Query ID List of all active Namespace
     BuildCmd_IdentSpecifiedNS(my_srbext, data, nsid);
     status = SubmitAdmCmd(my_srbext, &my_srbext->NvmeCmd);
-    //if(poll == true) means this request comes from StartIo
     if (!NT_SUCCESS(status))
         goto END;
 
@@ -3074,9 +2597,6 @@ END:
 }
 NTSTATUS CNvmeDevice::IdentifyActiveNamespaceIdList(PSPCNVME_SRBEXT srbext, PVOID nsid_list, ULONG& ret_count)
 {
-//list_count is "how many elemens(not bytes) in nsid_list can store."
-//nsid_list is buffer to retrieve nsid returned by this command.
-//ret_count is "how many actual nsid(elements, not bytes) returned by this command".
     if (!IsWorking())
         return STATUS_INVALID_DEVICE_STATE;
 
@@ -3093,7 +2613,6 @@ NTSTATUS CNvmeDevice::IdentifyActiveNamespaceIdList(PSPCNVME_SRBEXT srbext, PVOI
         my_srbext = srbext_ptr.Get();
     }
 
-    //Query ID List of all active Namespace
     BuildCmd_IdentActiveNsidList(my_srbext, nsid_list, PAGE_SIZE);
     status = SubmitAdmCmd(my_srbext, &my_srbext->NvmeCmd);
     if (!NT_SUCCESS(status))
@@ -3120,11 +2639,6 @@ NTSTATUS CNvmeDevice::IdentifyActiveNamespaceIdList(PSPCNVME_SRBEXT srbext, PVOI
 }
 NTSTATUS CNvmeDevice::SetNumberOfIoQueue(USHORT count)
 {
-    //this is SET_FEATURE of NVMe Adm Command.
-    //The flow is :
-    //  1.host tell device "how many i/o queues I want to use".
-    //  2.device reply to host "how many queues I can permit you to use".
-    //CNvmeDevice::DesiredIoQ should be filled by step2's answer.
     if (!IsWorking())
         return STATUS_INVALID_DEVICE_STATE;
 
@@ -3135,7 +2649,6 @@ NTSTATUS CNvmeDevice::SetNumberOfIoQueue(USHORT count)
     BuildCmd_SetIoQueueCount(my_srbext, count);
     status = SubmitAdmCmd(my_srbext, &my_srbext->NvmeCmd);
 
-    //if(poll == true) means this request comes from StartIo
     if (!NT_SUCCESS(status))
         goto END;
 
@@ -3220,9 +2733,6 @@ NTSTATUS CNvmeDevice::SetPowerManagement()
 }
 NTSTATUS CNvmeDevice::GetLbaFormat(ULONG nsid, NVME_LBA_FORMAT& format)
 {
-    //namespace id should be 1 based.
-    //** according NVME_COMMAND::CDW0, NSID==0 if not used in command.
-    //   So I guess the NSID is 1 based index....
     if (0 == nsid)
         return STATUS_INVALID_PARAMETER;
 
@@ -3235,9 +2745,6 @@ NTSTATUS CNvmeDevice::GetLbaFormat(ULONG nsid, NVME_LBA_FORMAT& format)
 }
 NTSTATUS CNvmeDevice::GetNamespaceBlockSize(ULONG nsid, ULONG& size)
 {
-    //namespace id should be 1 based.
-    //** according NVME_COMMAND::CDW0, NSID==0 if not used in command.
-    //   So I guess the NSID is 1 based index....
     if (0 == nsid)
         return STATUS_INVALID_PARAMETER;
 
@@ -3250,9 +2757,6 @@ NTSTATUS CNvmeDevice::GetNamespaceBlockSize(ULONG nsid, ULONG& size)
 }
 NTSTATUS CNvmeDevice::GetNamespaceTotalBlocks(ULONG nsid, ULONG64& blocks)
 {
-    //namespace id should be 1 based.
-    //** according NVME_COMMAND::CDW0, NSID==0 if not used in command.
-    //   So I guess the NSID is 1 based index....
     if (0 == nsid)
         return STATUS_INVALID_PARAMETER;
 
@@ -3294,11 +2798,9 @@ NTSTATUS CNvmeDevice::SetPerfOpts()
     if (!IsWorking())
         return STATUS_INVALID_DEVICE_STATE;
 
-    //initialize perf options
     PERF_CONFIGURATION_DATA set_perf = { 0 };
     PERF_CONFIGURATION_DATA supported = { 0 };
     ULONG stor_status = STOR_STATUS_SUCCESS;
-    //Just using STOR_PERF_VERSION_5, STOR_PERF_VERSION_6 is for Win2019 and above...
     supported.Version = STOR_PERF_VERSION_5;
     supported.Size = sizeof(PERF_CONFIGURATION_DATA);
     stor_status = StorPortInitializePerfOpts(this, TRUE, &supported);
@@ -3308,23 +2810,18 @@ NTSTATUS CNvmeDevice::SetPerfOpts()
     set_perf.Version = STOR_PERF_VERSION_5;
     set_perf.Size = sizeof(PERF_CONFIGURATION_DATA);
 
-    //Allow multiple I/O incoming concurrently. 
     if(0 != (supported.Flags & STOR_PERF_CONCURRENT_CHANNELS))
     {
         set_perf.Flags |= STOR_PERF_CONCURRENT_CHANNELS;
         set_perf.ConcurrentChannels = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
     }
-    //I don't use SGL... but Win10 don't support this flag
     if (0 != (supported.Flags & STOR_PERF_NO_SGL))
         set_perf.Flags |= STOR_PERF_NO_SGL;
-    //IF not set this flag, storport will attempt to fire completion DPC on
-    //original cpu which accept this I/O request.
     if (0 != (supported.Flags & STOR_PERF_DPC_REDIRECTION_CURRENT_CPU))
     {
         set_perf.Flags |= STOR_PERF_DPC_REDIRECTION_CURRENT_CPU;
     }
 
-    //spread DPC to all cpu. don't make single cpu too busy.
     if (0 != (supported.Flags & STOR_PERF_DPC_REDIRECTION))
         set_perf.Flags |= STOR_PERF_DPC_REDIRECTION;
 
@@ -3336,9 +2833,6 @@ NTSTATUS CNvmeDevice::SetPerfOpts()
 }
 bool CNvmeDevice::IsInValidIoRange(ULONG nsid, ULONG64 offset, ULONG len)
 {
-    //namespace id should be 1 based.
-    //** according NVME_COMMAND::CDW0, NSID==0 if not used in command.
-    //   So I guess the NSID is 1 based index....
     if (0 == nsid || 0 == NamespaceCount)
         return false;
 
@@ -3367,8 +2861,6 @@ NTSTATUS CNvmeDevice::RegisterIoQueues(PSPCNVME_SRBEXT srbext)
     for (ULONG i = 0; i < AllocatedIoQ; i++)
     {
         temp->Init(this, NULL);
-//register IoQueue should register CplQ first, then SubQ.
-//They are "QueuePair" .
         BuildCmd_RegIoCplQ(temp, IoQueue[i]);
         status = AdmQueue->SubmitCmd(temp, &temp->NvmeCmd);
         if(!NT_SUCCESS(status))
@@ -3379,8 +2871,6 @@ NTSTATUS CNvmeDevice::RegisterIoQueues(PSPCNVME_SRBEXT srbext)
 
         do
         {
-            //when Register I/O Queues, Interrupt are already connected.
-            //We just wait for ISR complete commands...
             StorPortStallExecution(StallDelay);
         } while (SRB_STATUS_PENDING == temp->SrbStatus);
 
@@ -3398,8 +2888,6 @@ NTSTATUS CNvmeDevice::RegisterIoQueues(PSPCNVME_SRBEXT srbext)
 
         do
         {
-            //when Register I/O Queues, Interrupt are already connected.
-            //We just wait for ISR complete commands...
             StorPortStallExecution(StallDelay);
         } while (SRB_STATUS_PENDING == temp->SrbStatus);
 
@@ -3441,10 +2929,6 @@ NTSTATUS CNvmeDevice::UnregisterIoQueues(PSPCNVME_SRBEXT srbext)
     for (ULONG i = 0; i < DesiredIoQ; i++)
     {
         temp->Init(this, NULL);
-        //register IoQueue should register CplQ first, then SubQ.
-        //They are "Pair" .
-        //when UNREGISTER IoQueues, the sequence should be reversed :
-        // unregister SubQ first, then CplQ.
         BuildCmd_UnRegIoSubQ(temp, IoQueue[i]);
         status = AdmQueue->SubmitCmd(temp, &temp->NvmeCmd);
         if (!NT_SUCCESS(status))
@@ -3455,8 +2939,6 @@ NTSTATUS CNvmeDevice::UnregisterIoQueues(PSPCNVME_SRBEXT srbext)
 
         do
         {
-            //when Register I/O Queues, Interrupt are already connected.
-            //We just wait for ISR complete commands...
             StorPortStallExecution(StallDelay);
         } while (SRB_STATUS_PENDING == temp->SrbStatus);
 
@@ -3474,8 +2956,6 @@ NTSTATUS CNvmeDevice::UnregisterIoQueues(PSPCNVME_SRBEXT srbext)
 
         do
         {
-            //when Register I/O Queues, Interrupt are already connected.
-            //We just wait for ISR complete commands...
             StorPortStallExecution(StallDelay);
         } while (SRB_STATUS_PENDING == temp->SrbStatus);
 
@@ -3510,7 +2990,7 @@ NTSTATUS CNvmeDevice::CreateAdmQ()
     cfg.DevExt = this;
     cfg.NumaNode = MM_ANY_NODE_OK;
     cfg.Type = QUEUE_TYPE::ADM_QUEUE;
-    cfg.HistoryDepth = NVME_CONST::MAX_IO_PER_LU;    //HistoryDepth should equal to MaxScsiTag (ScsiTag Depth).
+    cfg.HistoryDepth = NVME_CONST::MAX_IO_PER_LU;
     GetAdmQueueDbl(cfg.SubDbl , cfg.CplDbl);
     AdmQueue = new CNvmeQueue(&cfg);
     if(!AdmQueue->IsInitOK())
@@ -3519,7 +2999,6 @@ NTSTATUS CNvmeDevice::CreateAdmQ()
 }
 NTSTATUS CNvmeDevice::RegisterAdmQ()
 {
-//AQA register should be only modified when csts.RDY==0(cc.EN == 0)
     if(IsControllerReady() || NULL == AdmQueue)
     {
         NVME_CONTROLLER_STATUS csts = { 0 };
@@ -3536,7 +3015,7 @@ NTSTATUS CNvmeDevice::RegisterAdmQ()
 
     if(0 == subq.QuadPart || NULL == cplq.QuadPart)
         return STATUS_MEMORY_NOT_ALLOCATED;
-    aqa.ASQS = AdmDepth - 1;    //ASQS and ACQS are zero based index. here we should fill "MAX index" not total count;
+    aqa.ASQS = AdmDepth - 1;
     aqa.ACQS = AdmDepth - 1;
     asq.AsUlonglong = (ULONGLONG)subq.QuadPart;
     acq.AsUlonglong = (ULONGLONG)cplq.QuadPart;
@@ -3545,7 +3024,6 @@ NTSTATUS CNvmeDevice::RegisterAdmQ()
 }
 NTSTATUS CNvmeDevice::UnregisterAdmQ()
 {
-    //AQA register should be only modified when (csts.RDY==0 && cc.EN == 0)
     if (IsControllerReady())
     {
         NVME_CONTROLLER_STATUS csts = { 0 };
@@ -3571,10 +3049,6 @@ NTSTATUS CNvmeDevice::DeleteAdmQ()
 }
 void CNvmeDevice::ReadCtrlCap()
 {
-    //CtrlReg->CAP.TO is timeout value in "500 ms" unit.
-    //It indicates the timeout worst case of Enabling/Disabling Controller.
-    //e.g. CAP.TO==3 means worst case timout to Enable/Disable controller is 1500 milli-second.
-    //We should convert it to micro-seconds for StorPortStallExecution() using.
     
     ReadNvmeRegister(NvmeVer);
     ReadNvmeRegister(CtrlCap);
@@ -3594,7 +3068,6 @@ bool CNvmeDevice::MapCtrlRegisters()
     BOOLEAN in_iospace = FALSE;
     STOR_PHYSICAL_ADDRESS bar0 = { 0 };
     INTERFACE_TYPE type = PortCfg->AdapterInterfaceType;
-    //I got this mapping method by cracking stornvme.sys.
     bar0.LowPart = (PciCfg.u.type0.BaseAddresses[0] & 0xFFFFC000);
     bar0.HighPart = PciCfg.u.type0.BaseAddresses[1];
 
@@ -3625,7 +3098,6 @@ bool CNvmeDevice::GetPciBusData(INTERFACE_TYPE type, ULONG bus, ULONG slot)
     ULONG size = sizeof(PciCfg);
     ULONG status = StorPortGetBusData(this, type, bus, slot, &PciCfg, size);
 
-    //refer to MSDN StorPortGetBusData() to check why 2==status is error.
     if (2 == status || status != size)
         return false;
 
@@ -3672,7 +3144,6 @@ bool CNvmeDevice::WaitForCtrlerState(ULONG time_us, BOOLEAN csts_rdy, BOOLEAN cc
 bool CNvmeDevice::WaitForCtrlerShst(ULONG time_us)
 {
     ULONG elapsed = 0;
-    //BOOLEAN is_ready = IsControllerReady();
     BOOLEAN shn_done = FALSE;
 
     while (!shn_done)
@@ -3702,11 +3173,11 @@ void CNvmeDevice::InitVars()
     DeviceID = 0;
     State = NVME_STATE::STOP;
     CpuCount = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
-    TotalNumaNodes = 0;     //todo: query total numa nodes.
+    TotalNumaNodes = 0;
     RegisteredIoQ = 0;
     AllocatedIoQ = 0;
     DesiredIoQ = NVME_CONST::IO_QUEUE_COUNT;
-    DeviceTimeout = 2000 * NVME_CONST::STALL_TIME_US;        //should be updated by CAP, unit in micro-seconds
+    DeviceTimeout = 2000 * NVME_CONST::STALL_TIME_US;
     StallDelay = NVME_CONST::STALL_TIME_US;
     AccessRangeCount = 0;
     NamespaceCount = 0;
@@ -3750,8 +3221,6 @@ void CNvmeDevice::LoadRegistry()
         return;
 
     RtlZeroMemory(buffer, size);
-    //ret_size should assign buffer length when calling in,
-    //then it will return "how many bytes read from registry".
     ret_size = size;    
     ok = StorPortRegistryRead(this, REGNAME_COALESCE_COUNT, TRUE, 
         REG_DWORD, (PUCHAR) buffer, &ret_size);
@@ -3796,14 +3265,13 @@ NTSTATUS CNvmeDevice::CreateIoQ()
     cfg.Depth = IoDepth;
     cfg.NumaNode = 0;
     cfg.Type = QUEUE_TYPE::IO_QUEUE;
-    cfg.HistoryDepth = NVME_CONST::MAX_IO_PER_LU;    //HistoryDepth should equal to MaxScsiTag (ScsiTag Depth).
+    cfg.HistoryDepth = NVME_CONST::MAX_IO_PER_LU;
 
     for(USHORT i=0; i<DesiredIoQ; i++)
     {
         if(NULL != IoQueue[i])
             continue;
         CNvmeQueue* queue = new CNvmeQueue();
-        //Dbl[0] is for AdminQ
         cfg.QID = i + 1;
         this->GetQueueDbl(cfg.QID, cfg.SubDbl, cfg.CplDbl);
         status = queue->Setup(&cfg);
@@ -3836,9 +3304,9 @@ NTSTATUS CNvmeDevice::DeleteIoQ()
 
 #pragma endregion
 
-// ===== End NvmeDevice.cpp =====
 
-// ===== Begin NvmeQueue.cpp =====
+// NVMe Submission Queue / Completion Queue の管理実装です。
+// Command ID の割り当て、Doorbell 更新、Completion Entry の回収、SRB 完了通知を担います。
 static __inline size_t CalcQueueBufferSize(USHORT depth)
 {
     size_t page_count = BYTES_TO_PAGES(depth * sizeof(NVME_COMMAND)) +
@@ -3848,8 +3316,6 @@ static __inline size_t CalcQueueBufferSize(USHORT depth)
 
 static __inline ULONG ReadDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL dbl)
 {
-//In release build, Read/Write Register use READ_REGISTER_ULONG / WRITE_REGISTER_ULONG
-//Macros. They all have FastFence() already so no need to call MemoryBarrier in release build.
 #if !defined(DBG)
     MemoryBarrier();
     UNREFERENCED_PARAMETER(devext);
@@ -3858,8 +3324,6 @@ static __inline ULONG ReadDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL
 }
 static __inline ULONG ReadDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL dbl)
 {
-//In release build, Read/Write Register use READ_REGISTER_ULONG / WRITE_REGISTER_ULONG
-//Macros. They all have FastFence() already so no need to call MemoryBarrier in release build.
 #if !defined(DBG)
     MemoryBarrier();
     UNREFERENCED_PARAMETER(devext);
@@ -3868,26 +3332,18 @@ static __inline ULONG ReadDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL
 }
 static __inline void WriteDbl(PVOID devext, PNVME_SUBMISSION_QUEUE_TAIL_DOORBELL dbl, ULONG value)
 {
-//In release build, Read/Write Register use READ_REGISTER_ULONG / WRITE_REGISTER_ULONG
-//Macros. They all have FastFence() already so no need to call MemoryBarrier in release build.
 #if !defined(DBG)
     UNREFERENCED_PARAMETER(devext);
 #endif
-    //Doorbell should write 32bit ULONG.
-    //Some controller won't accept the doorbell value if you write only 16bit USHORT value.
     MemoryBarrier();
     StorPortWriteRegisterUlong(devext, &dbl->AsUlong, value);
 }
 static __inline void WriteDbl(PVOID devext, PNVME_COMPLETION_QUEUE_HEAD_DOORBELL dbl, ULONG value)
 {
-//In release build, Read/Write Register use READ_REGISTER_ULONG / WRITE_REGISTER_ULONG
-//Macros. They all have FastFence() already so no need to call MemoryBarrier in release build.
 #if !defined(DBG)
     MemoryBarrier();
     UNREFERENCED_PARAMETER(devext);
 #endif
-    //Doorbell should write 32bit ULONG.
-    //Some controller won't accept the doorbell value if you write only 16bit USHORT value.
     StorPortWriteRegisterUlong(devext, &dbl->AsUlong, value);
 }
 static __inline bool IsValidQid(ULONG qid)
@@ -3909,8 +3365,6 @@ static __inline void UpdateCplHeadAndPhase(ULONG& cpl_head, USHORT& phase, USHOR
     UpdateCplHead(cpl_head, depth);
     if (0 == cpl_head)
         phase = !phase;
-    //quick calculation, write a boolean table will know why.
-    //    phase = !(cpl_head ^ phase);      
 }
 #pragma region ======== class CNvmeQueue ========
 
@@ -3956,7 +3410,6 @@ NTSTATUS CNvmeQueue::Setup(QUEUE_PAIR_CONFIG* config)
     SubDbl = config->SubDbl;
     CplDbl = config->CplDbl;
     HistoryDepth = config->HistoryDepth;
-    //Todo: StorPortNotification(SetTargetProcessorDpc)
     StorPortInitializeDpc(DevExt, &QueueCplDpc, QueueCplDpcRoutine);
 
     if(NULL == Buffer)
@@ -3984,7 +3437,6 @@ NTSTATUS CNvmeQueue::Setup(QUEUE_PAIR_CONFIG* config)
     status = History.Setup(this, this->DevExt, this->HistoryDepth, this->NumaNode);
     if (!NT_SUCCESS(status))
     {
-        //status = STATUS_INTERNAL_ERROR;
         goto ERROR;
     }
 
@@ -4008,8 +3460,6 @@ NTSTATUS CNvmeQueue::SubmitCmd(SPCNVME_SRBEXT* srbext, PNVME_COMMAND src_cmd)
     if (!this->IsReady)
         return STATUS_DEVICE_NOT_READY;
 
-    //throttle of submittion. If SubTail exceed CplHead, 
-    //NVMe device will have fatal error and stopped.
     if(!IsSafeForSubmit())
         return STATUS_DEVICE_BUSY;
 
@@ -4019,12 +3469,10 @@ NTSTATUS CNvmeQueue::SubmitCmd(SPCNVME_SRBEXT* srbext, PNVME_COMMAND src_cmd)
     if (STATUS_ALREADY_COMMITTED == status)
     {
         DbgBreakPoint();
-        //old cmd is timed out, release it...
         PSPCNVME_SRBEXT old_srbext = NULL;
         History.Pop(cid, old_srbext);
         old_srbext->CompleteSrb(SRB_STATUS_BUSY);
 
-        //after release old cmd, push current cmd again...
         History.Push(cid, srbext);
     }
     else if (!NT_SUCCESS(status))
@@ -4052,7 +3500,6 @@ void CNvmeQueue::ResetAllCmd()
 }
 void CNvmeQueue::CompleteCmd(ULONG max_count)
 {
-    //DPC is global scope mutex?
     PNVME_COMPLETION_ENTRY cpl = &CplQ_VA[CplHead];
     PSPCNVME_SRBEXT srbext = NULL;
     USHORT cid = 0;
@@ -4149,22 +3596,19 @@ void CNvmeQueue::WriteCplHead(ULONG value)
 
 bool CNvmeQueue::AllocQueueBuffer()
 {
-    PHYSICAL_ADDRESS low = { 0 }; //I want to allocate it above 4G...
+    PHYSICAL_ADDRESS low = { 0 };
     PHYSICAL_ADDRESS high = { 0 };
     PHYSICAL_ADDRESS align = { 0 };
     
     low.HighPart = 0X000000001;
     high.QuadPart = (LONGLONG)-1;
 
-    //I am too lazy to check if NVMe device request continuous page or not, so.... 
-    //Allocate SubQ and CplQ together into a continuous physical memory block.
     ULONG status = StorPortAllocateContiguousMemorySpecifyCacheNode(
         this->DevExt, this->BufferSize,
         low, high, align,
         CNvmeQueue::CacheType, this->NumaNode,
         &this->Buffer);
 
-    //todo: log 
     if(STOR_STATUS_SUCCESS != status)
     {
         KdBreakPoint();
@@ -4177,10 +3621,6 @@ bool CNvmeQueue::AllocQueueBuffer()
 }
 bool CNvmeQueue::InitQueueBuffer()
 {
-    //SubQ and CplQ should be placed on same continuous memory block.
-    //1.Calculate total block size. 
-    //2.Split total size to SubQ size and CplQ size. 
-    //NOTE: both of them should be PAGE_ALIGNED
     this->SubQ_Size = this->Depth * sizeof(NVME_COMMAND);
     this->CplQ_Size = this->Depth * sizeof(NVME_COMPLETION_ENTRY);
 
@@ -4189,11 +3629,8 @@ bool CNvmeQueue::InitQueueBuffer()
     cursor += this->SubQ_Size;
     this->CplQ_VA = (PNVME_COMPLETION_ENTRY)ROUND_TO_PAGES(cursor);
 
-    //this->BufferSize = this->SubQ_Size + this->CplQ_Size;
-    //Because Align to Page could cause extra waste space in memory.
-    //So should check if CplQ exceeds total buffer length...
     if((cursor + this->CplQ_Size) > ((PUCHAR)this->Buffer + this->BufferSize))
-        goto ERROR; //todo: log
+        goto ERROR;
 
     RtlZeroMemory(this->Buffer, this->BufferSize);
     this->SubQ_PA = MmGetPhysicalAddress(this->SubQ_VA);
@@ -4226,7 +3663,6 @@ void CNvmeQueue::DeallocQueueBuffer()
 #pragma region ======== class CCmdHistory ========
 CCmdHistory::CCmdHistory()
 {
-    //KeInitializeSpinLock(&CmdLock);
 }
 CCmdHistory::CCmdHistory(class CNvmeQueue* parent, PVOID devext, USHORT depth, ULONG numa_node)
         : CCmdHistory()
@@ -4254,7 +3690,6 @@ NTSTATUS CCmdHistory::Setup(class CNvmeQueue* parent, PVOID devext, USHORT depth
 }
 void CCmdHistory::Teardown()
 {
-    //todo: complete all remained SRBEXT
 
     if(NULL != this->Buffer)
         StorPortFreePool(this->DevExt, this->Buffer);
@@ -4305,15 +3740,12 @@ NTSTATUS CCmdHistory::Pop(ULONG index, PSPCNVME_SRBEXT& srbext)
     return STATUS_SUCCESS;
 }
 #pragma endregion
-// ===== End NvmeQueue.cpp =====
 
-// ===== Begin StartIo_Handler.cpp =====
-
+// HwStartIo から呼ばれる要求本体のディスパッチャです。
+// BuildIo で検証済みの SRB を SCSI CDB、IOCTL、既定エラー処理へ振り分けます。
 UCHAR StartIo_DefaultHandler(PSPCNVME_SRBEXT srbext)
 {
     UNREFERENCED_PARAMETER(srbext);
-    //SetScsiSenseBySrbStatus(srbext->Srb, SRB_STATUS_INVALID_REQUEST);
-    //StorPortNotification(RequestComplete, srbext->DevExt, srbext->Srb);
     return SRB_STATUS_INVALID_REQUEST;
 }
 UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
@@ -4325,24 +3757,17 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     switch(opcode)
     {
 #if 0
-    // 6-byte commands:
     case SCSIOP_TEST_UNIT_READY:
     case SCSIOP_REZERO_UNIT:
-        //case SCSIOP_REWIND:
     case SCSIOP_REQUEST_BLOCK_ADDR:
     case SCSIOP_FORMAT_UNIT:
     case SCSIOP_READ_BLOCK_LIMITS:
     case SCSIOP_REASSIGN_BLOCKS:
-        //case SCSIOP_INIT_ELEMENT_STATUS:
     case SCSIOP_SEEK6:
-        //case SCSIOP_TRACK_SELECT:
-        //case SCSIOP_SLEW_PRINT:
-        //case SCSIOP_SET_CAPACITY:
     case SCSIOP_SEEK_BLOCK:
     case SCSIOP_PARTITION:
     case SCSIOP_READ_REVERSE:
     case SCSIOP_WRITE_FILEMARKS:
-        //case SCSIOP_FLUSH_BUFFER:
     case SCSIOP_SPACE:
     case SCSIOP_RECOVER_BUF_DATA:
     case SCSIOP_RESERVE_UNIT:
@@ -4350,27 +3775,21 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_COPY:
     case SCSIOP_ERASE:
     case SCSIOP_START_STOP_UNIT:
-        //case SCSIOP_STOP_PRINT:
-        //case SCSIOP_LOAD_UNLOAD:
     case SCSIOP_RECEIVE_DIAGNOSTIC:
     case SCSIOP_SEND_DIAGNOSTIC:
     case SCSIOP_MEDIUM_REMOVAL:
 
-    //refer to https://learn.microsoft.com/zh-tw/windows-hardware/test/hlk/testref/1f98eed5-478b-42bc-8c17-ee49a2c63202
     case SCSIOP_REQUEST_SENSE:
         srb_status = Scsi_RequestSense6(srbext);
         break;
 #endif
-    case SCSIOP_MODE_SELECT:        //cache and other feature options
+    case SCSIOP_MODE_SELECT:
         srb_status = Scsi_ModeSelect6(srbext);
         break;
     case SCSIOP_READ6:
-        //case SCSIOP_RECEIVE:
         srb_status = Scsi_Read6(srbext);
         break;
     case SCSIOP_WRITE6:
-        //case SCSIOP_PRINT:
-        //case SCSIOP_SEND:
         srb_status = Scsi_Write6(srbext);
         break;
     case SCSIOP_INQUIRY:
@@ -4383,12 +3802,9 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
         srb_status = Scsi_Verify6(srbext);
         break;
 
-        // 10-byte commands
 #if 0
     case SCSIOP_READ_FORMATTED_CAPACITY:
     case SCSIOP_SEEK:
-        //case SCSIOP_LOCATE:
-        //case SCSIOP_POSITION_TO_ELEMENT:
     case SCSIOP_WRITE_VERIFY:
     case SCSIOP_SEARCH_DATA_HIGH:
     case SCSIOP_SEARCH_DATA_EQUAL:
@@ -4404,15 +3820,12 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_CHANGE_DEFINITION:
     case SCSIOP_WRITE_SAME:
     case SCSIOP_READ_SUB_CHANNEL:
-        //case SCSIOP_UNMAP:
     case SCSIOP_READ_TOC:
     case SCSIOP_READ_HEADER:
-        //case SCSIOP_REPORT_DENSITY_SUPPORT:
     case SCSIOP_PLAY_AUDIO:
     case SCSIOP_GET_CONFIGURATION:
     case SCSIOP_PLAY_AUDIO_MSF:
     case SCSIOP_PLAY_TRACK_INDEX:
-        //case SCSIOP_SANITIZE:
     case SCSIOP_PLAY_TRACK_RELATIVE:
     case SCSIOP_GET_EVENT_STATUS:
     case SCSIOP_PAUSE_RESUME:
@@ -4421,16 +3834,11 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_STOP_PLAY_SCAN:
     case SCSIOP_XDWRITE:
     case SCSIOP_XPWRITE:
-        //case SCSIOP_READ_DISK_INFORMATION:
-        //case SCSIOP_READ_DISC_INFORMATION:
     case SCSIOP_READ_TRACK_INFORMATION:
     case SCSIOP_XDWRITE_READ:
-        //case SCSIOP_RESERVE_TRACK_RZONE:
     case SCSIOP_SEND_OPC_INFORMATION:
     case SCSIOP_RESERVE_UNIT10:
-        //case SCSIOP_RESERVE_ELEMENT:
     case SCSIOP_RELEASE_UNIT10:
-        //case SCSIOP_RELEASE_ELEMENT:
     case SCSIOP_REPAIR_TRACK:
     case SCSIOP_CLOSE_TRACK_SESSION:
     case SCSIOP_READ_BUFFER_CAPACITY:
@@ -4438,7 +3846,7 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_PERSISTENT_RESERVE_IN:
     case SCSIOP_PERSISTENT_RESERVE_OUT:
 #endif
-    case SCSIOP_MODE_SELECT10:          //cache and other feature options
+    case SCSIOP_MODE_SELECT10:
         srb_status = Scsi_ModeSelect10(srbext);
         break;
     case SCSIOP_READ_CAPACITY:
@@ -4457,24 +3865,16 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
         srb_status = Scsi_ModeSense10(srbext);
         break;
 
-        // 12-byte commands                  
 #if 0
     case SCSIOP_BLANK:
-        //case SCSIOP_ATA_PASSTHROUGH12:
     case SCSIOP_SEND_EVENT:
-        //case SCSIOP_SECURITY_PROTOCOL_IN:
     case SCSIOP_SEND_KEY:
-        //case SCSIOP_MAINTENANCE_IN:
     case SCSIOP_REPORT_KEY:
-        //case SCSIOP_MAINTENANCE_OUT:
     case SCSIOP_MOVE_MEDIUM:
     case SCSIOP_LOAD_UNLOAD_SLOT:
-        //case SCSIOP_EXCHANGE_MEDIUM:
     case SCSIOP_SET_READ_AHEAD:
-        //case SCSIOP_MOVE_MEDIUM_ATTACHED:
     case SCSIOP_SERVICE_ACTION_OUT12:
     case SCSIOP_SEND_MESSAGE:
-        //case SCSIOP_SERVICE_ACTION_IN12:
     case SCSIOP_GET_PERFORMANCE:
     case SCSIOP_READ_DVD_STRUCTURE:
     case SCSIOP_WRITE_VERIFY12:
@@ -4484,31 +3884,22 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_SET_LIMITS12:
     case SCSIOP_READ_ELEMENT_STATUS_ATTACHED:
     case SCSIOP_REQUEST_VOL_ELEMENT:
-        //case SCSIOP_SECURITY_PROTOCOL_OUT:
     case SCSIOP_SEND_VOLUME_TAG:
-        //case SCSIOP_SET_STREAMING:
     case SCSIOP_READ_DEFECT_DATA:
     case SCSIOP_READ_ELEMENT_STATUS:
     case SCSIOP_READ_CD_MSF:
     case SCSIOP_SCAN_CD:
-        //case SCSIOP_REDUNDANCY_GROUP_IN:
     case SCSIOP_SET_CD_SPEED:
-        //case SCSIOP_REDUNDANCY_GROUP_OUT:
     case SCSIOP_PLAY_CD:
-        //case SCSIOP_SPARE_IN:
     case SCSIOP_MECHANISM_STATUS:
-        //case SCSIOP_SPARE_OUT:
     case SCSIOP_READ_CD:
-        //case SCSIOP_VOLUME_SET_IN:
     case SCSIOP_SEND_DVD_STRUCTURE:
-        //case SCSIOP_VOLUME_SET_OUT:
     case SCSIOP_INIT_ELEMENT_RANGE:
 #endif
     case SCSIOP_REPORT_LUNS:
         srb_status = Scsi_ReportLuns12(srbext);
         break;
     case SCSIOP_READ12:
-        //case SCSIOP_GET_MESSAGE:
         srb_status = Scsi_Read12(srbext);
         break;
     case SCSIOP_WRITE12:
@@ -4521,18 +3912,12 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_SECURITY_PROTOCOL_OUT:
 		srb_status = SRB_STATUS_INVALID_REQUEST;
         break;
-        // 16-byte commands
 #if 0
     case SCSIOP_XDWRITE_EXTENDED16:
-        //case SCSIOP_WRITE_FILEMARKS16:
     case SCSIOP_REBUILD16:
-        //case SCSIOP_READ_REVERSE16:
     case SCSIOP_REGENERATE16:
     case SCSIOP_EXTENDED_COPY:
-        //case SCSIOP_POPULATE_TOKEN:
-        //case SCSIOP_WRITE_USING_TOKEN:
     case SCSIOP_RECEIVE_COPY_RESULTS:
-        //case SCSIOP_RECEIVE_ROD_TOKEN_INFORMATION:
     case SCSIOP_ATA_PASSTHROUGH16:
     case SCSIOP_ACCESS_CONTROL_IN:
     case SCSIOP_ACCESS_CONTROL_OUT:
@@ -4542,11 +3927,8 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
     case SCSIOP_WRITE_VERIFY16:
     case SCSIOP_PREFETCH16:
     case SCSIOP_SYNCHRONIZE_CACHE16:
-        //case SCSIOP_SPACE16:
     case SCSIOP_LOCK_UNLOCK_CACHE16:
-        //case SCSIOP_LOCATE16:
     case SCSIOP_WRITE_SAME16:
-        //case SCSIOP_ERASE16:
     case SCSIOP_ZBC_OUT:
     case SCSIOP_ZBC_IN:
     case SCSIOP_READ_DATA_BUFF16:
@@ -4563,14 +3945,9 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
         srb_status = Scsi_Verify16(srbext);
         break;
     case SCSIOP_READ_CAPACITY16:
-        //case SCSIOP_GET_LBA_STATUS:
-        //case SCSIOP_GET_PHYSICAL_ELEMENT_STATUS:
-        //case SCSIOP_REMOVE_ELEMENT_AND_TRUNCATE:
-        //case SCSIOP_SERVICE_ACTION_IN16:
         srb_status = Scsi_ReadCapacity16(srbext);
         break;
 
-        // 32-byte commands
 #if 0
     case SCSIOP_OPERATION32:
         break;
@@ -4585,27 +3962,6 @@ UCHAR StartIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
 UCHAR StartIo_IoctlHandler(PSPCNVME_SRBEXT srbext)
 {
 
-    //SRB_FUNCTION_IO_CONTROL handles serveral kinds (groups) of IOCTL:
-    //1. IOCTL_SCSI_MINIPORT_* ioctl codes.
-    //2. IOCTL_STORAGE_* ioctl codes
-    //3. custom made ioctl codes.
-    //4. .....so on.....
-    //All of them use SRB_IO_CONTROL as input buffer data. 
-    //it is passed-in via Srb->DataBuffer. Because there are many "groups" of 
-    //ioctl codes in this handler, so we should identify them by 
-    //SrbIoCtrl->Signature field. possible values are:
-    //  IOCTL_MINIPORT_SIGNATURE_SCSIDISK           "SCSIDISK"
-    //  IOCTL_MINIPORT_SIGNATURE_HYBRDISK           "HYBRDISK"
-    //  IOCTL_MINIPORT_SIGNATURE_DSM_NOTIFICATION   "MPDSM   "
-    //  IOCTL_MINIPORT_SIGNATURE_DSM_GENERAL        "MPDSMGEN"
-    //  IOCTL_MINIPORT_SIGNATURE_FIRMWARE           "FIRMWARE"
-    //  IOCTL_MINIPORT_SIGNATURE_QUERY_PROTOCOL     "PROTOCOL"
-    //  IOCTL_MINIPORT_SIGNATURE_SET_PROTOCOL       "SETPROTO"
-    //  IOCTL_MINIPORT_SIGNATURE_QUERY_TEMPERATURE  "TEMPERAT"
-    //  IOCTL_MINIPORT_SIGNATURE_SET_TEMPERATURE_THRESHOLD  "SETTEMPT"
-    //  IOCTL_MINIPORT_SIGNATURE_QUERY_PHYSICAL_TOPOLOGY    "TOPOLOGY"
-    //  IOCTL_MINIPORT_SIGNATURE_ENDURANCE_INFO     "ENDURINF"
-    //** to use custom made ioctl codes, you should also define your own signature for SrbIoCtrl->Signature.
     UCHAR srb_status = SRB_STATUS_INVALID_REQUEST;
     PSRB_IO_CONTROL ioctl = (PSRB_IO_CONTROL) srbext->DataBuf();
     size_t count = strlen(IOCTL_MINIPORT_SIGNATURE_SCSIDISK);
@@ -4623,10 +3979,10 @@ UCHAR StartIo_IoctlHandler(PSPCNVME_SRBEXT srbext)
 
     return srb_status;
 }
-// ===== End StartIo_Handler.cpp =====
 
-// ===== Begin BuildIo_Handler.cpp =====
-
+// HwBuildIo から呼ばれる軽量ハンドラ群です。
+// DISPATCH_LEVEL でも呼ばれ得るため、時間のかかる処理は避け、PnP/電源イベントや
+// StartIo 前の検証を中心に行います。
 static UCHAR AdapterPnp_QueryCapHandler(PSPCNVME_SRBEXT srbext)
 {
     PSTOR_DEVICE_CAPABILITIES_EX cap = (PSTOR_DEVICE_CAPABILITIES_EX)srbext->DataBuf();
@@ -4636,12 +3992,12 @@ static UCHAR AdapterPnp_QueryCapHandler(PSPCNVME_SRBEXT srbext)
     cap->DeviceD2 = 0;
     cap->LockSupported = 0;
     cap->EjectSupported = 0;
-    cap->Removable = 1;         //support RemoveAdapter
+    cap->Removable = 1;
     cap->DockDevice = 0;
     cap->UniqueID = 0;
-    cap->SilentInstall = 1;     //support silent install on DeviceManager UI
-    cap->SurpriseRemovalOK = 1; //support Adapter SurpriseRemove (hot plug)
-    cap->NoDisplayInUI = 0;     //should this adapter be shown on DeviceManager UI?
+    cap->SilentInstall = 1;
+    cap->SurpriseRemovalOK = 1;
+    cap->NoDisplayInUI = 0;
     cap->Address = 0;
     cap->UINumber = 0xFFFFFFFF;
     return SRB_STATUS_SUCCESS;
@@ -4649,28 +4005,20 @@ static UCHAR AdapterPnp_QueryCapHandler(PSPCNVME_SRBEXT srbext)
 
 BOOLEAN BuildIo_DefaultHandler(PSPCNVME_SRBEXT srbext)
 {
-    //srbext->SetStatus(SRB_STATUS_INVALID_REQUEST);
-    ////todo: set log 
-    //StorPortNotification(RequestComplete, srbext->DevExt, srbext->Srb);
 	srbext->CompleteSrb(SRB_STATUS_INVALID_REQUEST);
     return FALSE;
 }
 
 BOOLEAN BuildIo_IoctlHandler(PSPCNVME_SRBEXT srbext)
 {
-    //Handle IOCTL only in StartIo.
-    //I don't like to handle IOCTL in DISPATCH_LEVEL...
     UNREFERENCED_PARAMETER(srbext);
     return TRUE;
 }
 
 BOOLEAN BuildIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
 {
-    //todo: set log 
     DebugScsiOpCode(srbext->Cdb()->CDB6GENERIC.OperationCode);
     
-    //spcnvme only support 1 disk in current stage.
-    //so check path/target/lun here.
     UCHAR path = 0, target = 0, lun = 0;
     SrbGetPathTargetLun(srbext->Srb, &path, &target, &lun);
 
@@ -4685,7 +4033,6 @@ BOOLEAN BuildIo_ScsiHandler(PSPCNVME_SRBEXT srbext)
 BOOLEAN BuildIo_SrbPowerHandler(PSPCNVME_SRBEXT srbext)
 {
 	srbext->CompleteSrb(SRB_STATUS_INVALID_REQUEST);
-//always return FALSE. This event only handled in BuildIo.
     return FALSE;
 }
 
@@ -4702,7 +4049,6 @@ BOOLEAN BuildIo_SrbPnpHandler(PSPCNVME_SRBEXT srbext)
     flags = srb_pnp->SrbPnPFlags;
     action = srb_pnp->PnPAction;
 
-    //All unit control migrated to HwUnitControl callback...
     if(SRB_PNP_FLAGS_ADAPTER_REQUEST != (flags & SRB_PNP_FLAGS_ADAPTER_REQUEST))
     {
         goto END;
@@ -4714,20 +4060,15 @@ BOOLEAN BuildIo_SrbPnpHandler(PSPCNVME_SRBEXT srbext)
             srb_status = AdapterPnp_QueryCapHandler(srbext);
             break;
         case StorRemoveDevice:
-        //regular RemoveDevice should shutdown controller first, then delete all queue memory.
             status = srbext->DevExt->ShutdownController();
             if (!NT_SUCCESS(status))
             {
                 KdBreakPoint();
-                //todo: log
             }
             srbext->DevExt->Teardown();
             srb_status = SRB_STATUS_SUCCESS;
             break;
         case StorSurpriseRemoval:
-            //surprise remove doesn't need to shutdown controller.
-            //controller is already gone , access controller registers will make BSoD or other problem.
-            //srb_status = AdapterPnp_RemoveHandler(srbext);
             srbext->DevExt->Teardown();
             srb_status = SRB_STATUS_SUCCESS;
             break;
@@ -4735,7 +4076,5 @@ BOOLEAN BuildIo_SrbPnpHandler(PSPCNVME_SRBEXT srbext)
 
 END:
     srbext->CompleteSrb(srb_status);
-    //always return FALSE. This event only handled in BuildIo.
     return FALSE;
 }
-// ===== End BuildIo_Handler.cpp =====
